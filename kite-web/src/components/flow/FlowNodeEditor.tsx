@@ -67,6 +67,28 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import FlowPlaceholderExplorer from "./FlowPlaceholderExplorer";
 import env from "@/lib/env/client";
 import { ScrollArea } from "../ui/scroll-area";
+import { useForm, useFieldArray, UseFormReturn } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
+import { ComponentType, TextInputStyle } from "discord-api-types/v10";
+import { modalSchema } from "@/lib/schemas"; // adjust path if needed
+import { Form, FormControl, FormField, FormItem, FormLabel } from "../ui/form";
+import Collapsible from "../editor/Collapsible";
+import LabelEditor from "../editor/LabelEditor";
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
 
 interface Props {
   nodeId: string;
@@ -1408,46 +1430,56 @@ function EmojiDataInput({ data, updateData, errors }: InputProps) {
 }
 
 function ModalDataInput({ data, updateData, errors }: InputProps) {
-  const addInput = useCallback(() => {
-    updateData({
-      modal_data: {
-        title: data.modal_data?.title,
-        components: [
-          ...(data.modal_data?.components || []),
-          { components: [{ style: 1 }] },
-        ],
-      },
-    });
-  }, [updateData, data]);
-
-  const clearInputs = useCallback(() => {
-    updateData({
-      modal_data: {
-        title: data.modal_data?.title,
-        components: [],
-      },
-    });
-  }, [updateData, data]);
-
-  const updateComponentField = useCallback(
-    (r: number, c: number, newData: Partial<ModalComponentData>) => {
-      const current = data.modal_data || {};
-      if (!current.components) return;
-
-      const row = current.components[r];
-      if (!row || !row.components) return;
-
-      const component = row.components[c];
-      if (!component) return;
-
-      Object.assign(component, newData);
-
-      updateData({
-        modal_data: current,
-      });
+  const form = useForm<z.infer<typeof modalSchema>>({
+    resolver: zodResolver(modalSchema),
+    defaultValues: {
+      title: data.modal_data?.title ?? "",
+      custom_id: data.modal_data?.custom_id ?? "",
+      components: (data.modal_data?.components as z.infer<typeof modalSchema>["components"]) ?? [],
     },
-    [updateData, data]
+    mode: "onChange",
+  });
+
+  const { fields, append, remove, move } = useFieldArray({
+    control: form.control,
+    name: "components",
+  });
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (active.id !== over?.id) {
+      const oldIndex = fields.findIndex((f) => f.id === active.id);
+      const newIndex = fields.findIndex((f) => f.id === over?.id);
+      if (oldIndex !== -1 && newIndex !== -1) move(oldIndex, newIndex);
+    }
+  }
+
+  // Sync local form state back to Kite's ReactFlow node data
+  const syncToParent = useCallback(() => {
+    updateData({ modal_data: form.getValues() as any });
+  }, [form, updateData]);
+
+  function appendComponent(type: "label" | "text_display") {
+    if (type === "text_display") {
+      append({ type: ComponentType.TextDisplay, content: "" });
+    } else {
+      append({
+        type: ComponentType.Label,
+        label: "",
+        component: {
+          type: ComponentType.TextInput,
+          custom_id: "",
+          style: TextInputStyle.Short,
+        },
+      });
+    }
+    syncToParent();
+  }
 
   return (
     <Dialog>
@@ -1459,124 +1491,230 @@ function ModalDataInput({ data, updateData, errors }: InputProps) {
           <DialogTitle>Configure Modal</DialogTitle>
           <DialogDescription>
             Configure your modal here! A modal must have a title and at least
-            one input component.
+            one component.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-3">
-          <BaseInput
-            type="text"
-            field="modal_data"
-            title="Title"
-            value={data.modal_data?.title || ""}
-            updateValue={(v) =>
-              updateData({
-                modal_data: {
-                  title: v || undefined,
-                  components: data.modal_data?.components,
-                },
-              })
-            }
-            errors={errors}
-            placeholders
-          />
 
-          <div className="space-y-3">
-            <div className="font-medium text-foreground">Inputs</div>
-            {data.modal_data?.components?.map((row, r) =>
-              row?.components?.map((component, c) => (
-                <Card className="space-y-3 p-3 -mx-1" key={`${r}-${c}`}>
-                  <div className="flex space-x-3">
-                    <BaseInput
-                      type="select"
-                      field={`modal_data.components.${r}.components.${c}.type`}
-                      title="Type"
-                      value={component.style?.toString() || "1"}
-                      options={[
-                        {
-                          label: "Short",
-                          value: "1",
-                        },
-                        {
-                          label: "Paragraph",
-                          value: "2",
-                        },
-                      ]}
-                      updateValue={(v) =>
-                        updateComponentField(r, c, {
-                          style: parseInt(v) || 1,
-                        })
-                      }
-                      errors={errors}
+        <Form {...form}>
+          <div className="space-y-3" onChange={syncToParent}>
+
+            {/* Title */}
+            <FormField
+              control={form.control}
+              name="title"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel required count={form.watch("title")?.length ?? 0} max={45}>
+                    Title
+                  </FormLabel>
+                  <FormControl>
+                    <PlaceholderInput
+                      value={field.value}
+                      onChange={field.onChange}
+                      placeholder="My Modal"
                     />
-                    <BaseCheckbox
-                      field={`modal_data.components.${r}.components.${c}.required`}
-                      title="Required"
-                      value={component?.required || false}
-                      updateValue={(v) =>
-                        updateComponentField(r, c, {
-                          required: v,
-                        })
-                      }
-                      errors={errors}
-                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+
+            {/* Custom ID */}
+            <FormField
+              control={form.control}
+              name="custom_id"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel required>Custom ID</FormLabel>
+                  <FormControl>
+                    <Input {...field} placeholder="my_modal" />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+
+            {/* Components */}
+            <div className="space-y-2">
+              <div className="font-medium text-foreground">Components</div>
+
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragEnd={handleDragEnd}
+              >
+                <SortableContext
+                  items={fields.map((f) => f.id)}
+                  strategy={verticalListSortingStrategy}
+                >
+                  <div className="space-y-2">
+                    {fields.map((field, index) => {
+                      const componentType = form.watch(`components.${index}.type`);
+                      const isLabel = componentType === ComponentType.Label;
+                      const isTextDisplay = componentType === ComponentType.TextDisplay;
+
+                      const labelValue = isLabel
+                        ? form.watch(`components.${index}.label` as any)
+                        : undefined;
+                      const collapsibleTitle = isLabel
+                        ? `Input ${index + 1}${labelValue ? ` — ${labelValue}` : ""}`
+                        : `Text Display ${index + 1}`;
+
+                      // @ts-ignore
+                      const hasError = !!form.formState.errors.components?.[index];
+
+                      return (
+                        <Collapsible
+                          key={field.id}
+                          title={collapsibleTitle}
+                          level={1}
+                          hasError={hasError}
+                          onRemove={() => {
+                            remove(index);
+                            syncToParent();
+                          }}
+                          dragId={field.id}
+                        >
+                          <div className="space-y-2">
+                            {/* Component type selector — only shown for Label rows so user can switch inner type */}
+                            {isLabel && (
+                              <FormField
+                                control={form.control}
+                                name={`components.${index}.component.type` as any}
+                                render={({ field: typeField }) => (
+                                  <FormItem>
+                                    <FormLabel>Component Type</FormLabel>
+                                    <FormControl>
+                                      <Select
+                                        value={typeField.value?.toString()}
+                                        onValueChange={(v) => {
+                                          const newType = parseInt(v);
+                                          // Reset inner component with correct defaults when type changes
+                                          const defaults: Record<number, any> = {
+                                            [ComponentType.TextInput]: {
+                                              type: ComponentType.TextInput,
+                                              custom_id: form.getValues(`components.${index}.component.custom_id` as any) ?? "",
+                                              style: TextInputStyle.Short,
+                                            },
+                                            [ComponentType.StringSelect]: {
+                                              type: ComponentType.StringSelect,
+                                              custom_id: form.getValues(`components.${index}.component.custom_id` as any) ?? "",
+                                              options: [{ label: "Option", value: crypto.randomUUID().replace(/-/g, "") }],
+                                            },
+                                            [ComponentType.UserSelect]: {
+                                              type: ComponentType.UserSelect,
+                                              custom_id: form.getValues(`components.${index}.component.custom_id` as any) ?? "",
+                                            },
+                                            [ComponentType.ChannelSelect]: {
+                                              type: ComponentType.ChannelSelect,
+                                              custom_id: form.getValues(`components.${index}.component.custom_id` as any) ?? "",
+                                            },
+                                            [ComponentType.RoleSelect]: {
+                                              type: ComponentType.RoleSelect,
+                                              custom_id: form.getValues(`components.${index}.component.custom_id` as any) ?? "",
+                                            },
+                                            [ComponentType.MentionableSelect]: {
+                                              type: ComponentType.MentionableSelect,
+                                              custom_id: form.getValues(`components.${index}.component.custom_id` as any) ?? "",
+                                            },
+                                            [ComponentType.FileUpload]: {
+                                              type: ComponentType.FileUpload,
+                                              custom_id: form.getValues(`components.${index}.component.custom_id` as any) ?? "",
+                                            },
+                                          };
+                                          form.setValue(
+                                            `components.${index}.component` as any,
+                                            defaults[newType] ?? defaults[ComponentType.TextInput],
+                                            { shouldValidate: true, shouldDirty: true }
+                                          );
+                                          syncToParent();
+                                        }}
+                                      >
+                                        <SelectTrigger>
+                                          <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                          <SelectItem value={ComponentType.TextInput.toString()}>Text Input</SelectItem>
+                                          <SelectItem value={ComponentType.StringSelect.toString()}>Select Menu</SelectItem>
+                                          <SelectItem value={ComponentType.UserSelect.toString()}>User Select</SelectItem>
+                                          <SelectItem value={ComponentType.ChannelSelect.toString()}>Channel Select</SelectItem>
+                                          <SelectItem value={ComponentType.RoleSelect.toString()}>Role Select</SelectItem>
+                                          <SelectItem value={ComponentType.MentionableSelect.toString()}>User & Role Select</SelectItem>
+                                          <SelectItem value={ComponentType.FileUpload.toString()}>File Upload</SelectItem>
+                                        </SelectContent>
+                                      </Select>
+                                    </FormControl>
+                                  </FormItem>
+                                )}
+                              />
+                            )}
+
+                            {/* Delegate to the appropriate editor */}
+                            {isLabel && <LabelEditor form={form} index={index} />}
+                            {isTextDisplay && (
+                              <FormField
+                                control={form.control}
+                                name={`components.${index}.content` as any}
+                                render={({ field }) => (
+                                  <FormItem>
+                                    <FormLabel
+                                      required
+                                      count={form.watch(`components.${index}.content` as any)?.length ?? 0}
+                                    >
+                                      Content
+                                    </FormLabel>
+                                    <FormControl>
+                                      <Textarea
+                                        {...field}
+                                        onChange={(e) => {
+                                          field.onChange(e);
+                                          form.trigger("components");
+                                        }}
+                                      />
+                                    </FormControl>
+                                  </FormItem>
+                                )}
+                              />
+                            )}
+                          </div>
+                        </Collapsible>
+                      );
+                    })}
                   </div>
-                  <BaseInput
-                    type="text"
-                    field={`modal_data.components.${r}.components.${c}.custom_id`}
-                    title="Identifier"
-                    description="Used to identify the input in your flow."
-                    value={component?.custom_id || ""}
-                    updateValue={(v) =>
-                      updateComponentField(r, c, {
-                        custom_id: v || undefined,
-                      })
-                    }
-                    errors={errors}
-                    placeholders
-                  />
-                  <BaseInput
-                    type="text"
-                    field={`modal_data.components.${r}.components.${c}.label`}
-                    title="Label"
-                    value={component?.label || ""}
-                    updateValue={(v) =>
-                      updateComponentField(r, c, {
-                        label: v || undefined,
-                      })
-                    }
-                    errors={errors}
-                    placeholders
-                  />
-                  <BaseInput
-                    type="text"
-                    field={`modal_data.components.${r}.components.${c}.placeholder`}
-                    title="Placeholder"
-                    value={component?.placeholder || ""}
-                    updateValue={(v) =>
-                      updateComponentField(r, c, {
-                        placeholder: v || undefined,
-                      })
-                    }
-                    errors={errors}
-                    placeholders
-                  />
-                </Card>
-              ))
-            )}
-          </div>
+                </SortableContext>
+              </DndContext>
+            </div>
 
-          <div className="flex space-x-3">
-            <Button
-              onClick={addInput}
-              disabled={(data.modal_data?.components?.length || 0) >= 5}
-            >
-              Add Input
-            </Button>
-            <Button variant="outline" onClick={clearInputs}>
-              Clear Inputs
-            </Button>
+            {/* Footer actions */}
+            <div className="flex gap-2 flex-wrap">
+              <Button
+                type="button"
+                disabled={fields.length >= 5}
+                onClick={() => appendComponent("label")}
+              >
+                Add Input
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={fields.length >= 5}
+                onClick={() => appendComponent("text_display")}
+              >
+                Add Text Display
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={fields.length === 0}
+                onClick={() => {
+                  form.setValue("components", []);
+                  syncToParent();
+                }}
+              >
+                Clear
+              </Button>
+            </div>
+
           </div>
-        </div>
+        </Form>
       </DialogContent>
     </Dialog>
   );
