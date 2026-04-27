@@ -1493,12 +1493,36 @@ function ModalDataInput({ data, updateData, errors }: InputProps) {
                       value={component.style?.toString() || "1"}
                       options={[
                         {
-                          label: "Short",
+                          label: "Text Input",
                           value: "1",
                         },
                         {
-                          label: "Paragraph",
+                          label: "Select Menu",
                           value: "2",
+                        },
+                        {
+                          label: "Text Display",
+                          value: "3",
+                        },
+                        {
+                          label: "User Select",
+                          value: "4",
+                        },
+                        {
+                          label: "Channel Select",
+                          value: "5",
+                        },
+                        {
+                          label: "Role Select",
+                          value: "6",
+                        },
+                        {
+                          label: "User & Role Select",
+                          value: "7",
+                        },
+                        {
+                          label: "File Upload",
+                          value: "8",
                         },
                       ]}
                       updateValue={(v) =>
