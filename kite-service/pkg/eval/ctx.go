@@ -431,7 +431,7 @@ func NewRoleEnv(role discord.Role) *RoleEnv {
 		Name:     role.Name,
 		Mention:  fmt.Sprintf("<@&%s>", role.ID.String()),
 		Position: role.Position.String(),
-		Color:    hexColor, // Now stores the hex string
+		Color:    hexColor,
 	}
 }
 
@@ -470,18 +470,29 @@ func (m MessageEnv) String() string {
 type GuildEnv struct {
 	og discord.Guild
 
-	ID   string `expr:"id" json:"id"`
-	Name string `expr:"name" json:"name"`
+	ID     string `expr:"id" json:"id"`
+	Name   string `expr:"name" json:"name"`
+	Icon   string `expr:"icon" json:"icon"`
+	Banner string `expr:"banner" json:"banner"`
 }
 
 func NewGuildEnv(guild discord.Guild) *GuildEnv {
-	return &GuildEnv{
-		og: guild,
+	var iconURL string
+	if guild.Icon != "" { iconURL = "https://cdn.discordapp.com/icons/" + guild.ID.String() + "/" + guild.Icon + ".webp?size=1280" }
+	var bannerURL string
+	if guild.Banner != "" { bannerURL = "https://cdn.discordapp.com/banners/" + guild.ID.String() + "/" + guild.Icon + ".webp?size=480" }
 
-		ID:   guild.ID.String(),
-		Name: guild.Name,
+	return &GuildEnv{
+		og:   guild,
+
+		
+		ID:     guild.ID.String(),
+		Name:   guild.Name,
+		Icon:   iconURL,
+		Banner: bannerURL,
 	}
 }
+
 
 func (g GuildEnv) Thing() thing.Thing {
 	return thing.NewDiscordGuild(g.og)
