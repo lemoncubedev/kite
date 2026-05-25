@@ -413,6 +413,7 @@ type RoleEnv struct {
 
 	ID       string `expr:"id" json:"id"`
 	Name     string `expr:"name" json:"name"`
+	Permissions
 	Mention  string `expr:"mention" json:"mention"`
 	Position string `expr:"postition" json:"position"`
 	Color    string `expr:"color" json:"color"`
@@ -420,8 +421,6 @@ type RoleEnv struct {
 }
 
 func NewRoleEnv(role discord.Role) *RoleEnv {
-	var hexColor string
-	if role.Color == 0 { hexColor = "#000000" } else { hexColor = fmt.Sprintf("#%06X", role.Color) }
 
 	return &RoleEnv{
 		og:       role,
@@ -431,7 +430,7 @@ func NewRoleEnv(role discord.Role) *RoleEnv {
 		Name:     role.Name,
 		Mention:  fmt.Sprintf("<@&%s>", role.ID.String()),
 		Position: role.Position.String(),
-		Color:    hexColor,
+		Color:    role.Color,
 	}
 }
 
