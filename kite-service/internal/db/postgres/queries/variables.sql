@@ -17,6 +17,9 @@ WHERE variables.app_id = $1
 GROUP BY variables.id
 ORDER BY variables.created_at DESC;
 
+-- name: GetVariablesByAppWithoutTotals :many
+SELECT * FROM variables WHERE app_id = $1 ORDER BY created_at DESC;
+
 -- name: CountVariablesByApp :one
 SELECT COUNT(*) FROM variables WHERE app_id = $1;
 
@@ -43,25 +46,47 @@ WHERE id = $1 RETURNING *;
 -- name: DeleteVariable :exec
 DELETE FROM variables WHERE id = $1;
 
+-- variable_values has no app_id, so these reach the app through variables.
+
 -- name: GetVariableValue :one
-SELECT * FROM variable_values WHERE variable_id = $1 AND scope IS NOT DISTINCT FROM $2;
+SELECT variable_values.* FROM variable_values
+JOIN variables ON variables.id = variable_values.variable_id
+WHERE variable_values.variable_id = $1
+  AND variable_values.scope IS NOT DISTINCT FROM $2
+  AND variables.app_id = $3;
 
 -- name: GetVariableValueForUpdate :one
-SELECT * FROM variable_values WHERE variable_id = $1 AND scope IS NOT DISTINCT FROM $2 FOR UPDATE;
+-- FOR UPDATE OF so the joined variables row isn't locked too
+SELECT variable_values.* FROM variable_values
+JOIN variables ON variables.id = variable_values.variable_id
+WHERE variable_values.variable_id = $1
+  AND variable_values.scope IS NOT DISTINCT FROM $2
+  AND variables.app_id = $3
+FOR UPDATE OF variable_values;
 
 -- name: GetVariableValues :many
-SELECT * FROM variable_values WHERE variable_id = $1;
+SELECT variable_values.* FROM variable_values
+JOIN variables ON variables.id = variable_values.variable_id
+WHERE variable_values.variable_id = $1 AND variables.app_id = $2;
 
 -- name: SetVariableValue :one
+-- INSERT ... SELECT so a variable from another app inserts nothing (ErrNoRows)
 INSERT INTO variable_values (
     variable_id,
     scope,
     value,
     created_at,
     updated_at
-) VALUES (
-    $1, $2, $3, $4, $5
-) ON CONFLICT (variable_id, scope) DO UPDATE SET
+)
+SELECT
+    variables.id,
+    sqlc.narg(scope)::text,
+    @value::jsonb,
+    @created_at::timestamp,
+    @updated_at::timestamp
+FROM variables
+WHERE variables.id = @variable_id AND variables.app_id = @app_id
+ON CONFLICT (variable_id, scope) DO UPDATE SET
     value = EXCLUDED.value,
     updated_at = EXCLUDED.updated_at
 RETURNING *;
@@ -70,7 +95,39 @@ RETURNING *;
 -- IS NOT DISTINCT FROM so that unscoped values (scope IS NULL) are matched,
 -- same as the get queries above. Plain `= NULL` never matches and made
 -- deleting an unscoped variable value a silent no-op.
-DELETE FROM variable_values WHERE variable_id = $1 AND scope IS NOT DISTINCT FROM $2;
+DELETE FROM variable_values
+USING variables
+WHERE variables.id = variable_values.variable_id
+  AND variable_values.variable_id = $1
+  AND variable_values.scope IS NOT DISTINCT FROM $2
+  AND variables.app_id = $3;
 
 -- name: DeleteAllVariableValues :exec
-DELETE FROM variable_values WHERE variable_id = $1;
+DELETE FROM variable_values
+USING variables
+WHERE variables.id = variable_values.variable_id
+  AND variable_values.variable_id = $1
+  AND variables.app_id = $2;
+
+-- name: SearchVariableValues :many
+-- position() instead of LIKE so % and _ in the search text match literally
+SELECT variable_values.* FROM variable_values
+JOIN variables ON variables.id = variable_values.variable_id
+WHERE variable_values.variable_id = @variable_id
+  AND variables.app_id = @app_id
+  AND (
+    @search::text = ''
+    OR position(lower(@search::text) in lower(coalesce(variable_values.scope, ''))) > 0
+  )
+ORDER BY variable_values.updated_at DESC, variable_values.id DESC
+LIMIT @row_limit OFFSET @row_offset;
+
+-- name: CountSearchVariableValues :one
+SELECT COUNT(*) FROM variable_values
+JOIN variables ON variables.id = variable_values.variable_id
+WHERE variable_values.variable_id = @variable_id
+  AND variables.app_id = @app_id
+  AND (
+    @search::text = ''
+    OR position(lower(@search::text) in lower(coalesce(variable_values.scope, ''))) > 0
+  );

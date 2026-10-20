@@ -4,6 +4,7 @@ import (
 	"time"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
+	"github.com/go-ozzo/ozzo-validation/v4/is"
 	"github.com/kitecloud/kite/kite-service/internal/model"
 	"github.com/kitecloud/kite/kite-service/pkg/flow"
 	"github.com/kitecloud/kite/kite-service/pkg/message"
@@ -35,18 +36,7 @@ type MessageCreateRequest struct {
 }
 
 func (req *MessageCreateRequest) Sanitize() {
-	// Remove unused flow sources
-	newFlowSources := make(map[string]flow.FlowData, len(req.FlowSources))
-	for _, row := range req.Data.Components {
-		for _, comp := range row.Components {
-			flow, ok := req.FlowSources[comp.FlowSourceID]
-			if ok {
-				newFlowSources[comp.FlowSourceID] = flow
-			}
-		}
-	}
-
-	req.FlowSources = newFlowSources
+	req.FlowSources = usedFlowSources(&req.Data, req.FlowSources)
 }
 
 func (req MessageCreateRequest) Validate() error {
@@ -63,8 +53,8 @@ type MessagesImportRequest struct {
 }
 
 func (req *MessagesImportRequest) Sanitize() {
-	for _, message := range req.Messages {
-		message.Sanitize()
+	for i := range req.Messages {
+		req.Messages[i].Sanitize()
 	}
 }
 
@@ -84,18 +74,7 @@ type MessageUpdateRequest struct {
 }
 
 func (req *MessageUpdateRequest) Sanitize() {
-	// Remove unused flow sources
-	newFlowSources := make(map[string]flow.FlowData, len(req.FlowSources))
-	for _, row := range req.Data.Components {
-		for _, comp := range row.Components {
-			flow, ok := req.FlowSources[comp.FlowSourceID]
-			if ok {
-				newFlowSources[comp.FlowSourceID] = flow
-			}
-		}
-	}
-
-	req.FlowSources = newFlowSources
+	req.FlowSources = usedFlowSources(&req.Data, req.FlowSources)
 }
 
 func (req MessageUpdateRequest) Validate() error {
@@ -144,6 +123,20 @@ type MessageInstanceListResponse = []*MessageInstance
 type MessageInstanceCreateRequest struct {
 	DiscordGuildID   string `json:"discord_guild_id"`
 	DiscordChannelID string `json:"discord_channel_id"`
+	// ThreadName creates a new post with this title in a forum or media
+	// channel, with the message as its first message.
+	ThreadName string `json:"thread_name,omitempty"`
+	// AppliedTags are the IDs of the tags the forum post gets.
+	AppliedTags []string `json:"applied_tags,omitempty"`
+}
+
+func (req MessageInstanceCreateRequest) Validate() error {
+	return validation.ValidateStruct(&req,
+		validation.Field(&req.DiscordGuildID, validation.Required, is.Digit),
+		validation.Field(&req.DiscordChannelID, validation.Required, is.Digit),
+		validation.Field(&req.ThreadName, validation.Length(0, 100)),
+		validation.Field(&req.AppliedTags, validation.Length(0, 5), validation.Each(is.Digit)),
+	)
 }
 
 type MessageInstanceCreateResponse = MessageInstance
@@ -169,4 +162,16 @@ func MessageInstanceToWire(instance *model.MessageInstance) *MessageInstance {
 		CreatedAt:        instance.CreatedAt,
 		UpdatedAt:        instance.UpdatedAt,
 	}
+}
+
+// usedFlowSources drops flow sources that no component in the message references.
+func usedFlowSources(data *message.MessageData, flowSources map[string]flow.FlowData) map[string]flow.FlowData {
+	res := make(map[string]flow.FlowData, len(flowSources))
+	data.EachComponent(func(c *message.ComponentData) error {
+		if flow, ok := flowSources[c.FlowSourceID]; ok {
+			res[c.FlowSourceID] = flow
+		}
+		return nil
+	})
+	return res
 }

@@ -9,11 +9,24 @@ import {
 import { create, useStore } from "zustand";
 import { immer } from "zustand/middleware/immer";
 
-export type FlowContextType = "command" | "component_button" | "event_discord";
+export const flowContextTypes = [
+  "command",
+  "component_button",
+  "component_select_menu",
+  "event_discord",
+  "event_schedule",
+  "event_webhook",
+] as const;
+
+export type FlowContextType = (typeof flowContextTypes)[number];
 
 export interface FlowContextStore {
   type: FlowContextType;
   setType(type: FlowContextType): void;
+  // The blocks the flow AI changed in its last answer, which stand out until
+  // the user clicks into the editor.
+  aiChangedNodeIds: string[];
+  setAIChangedNodeIds(ids: string[]): void;
 }
 
 export const createFlowContextStore = () => {
@@ -22,6 +35,8 @@ export const createFlowContextStore = () => {
       type: "command",
 
       setType: (type) => set({ type }),
+      aiChangedNodeIds: [],
+      setAIChangedNodeIds: (ids) => set({ aiChangedNodeIds: ids }),
     }))
   );
 };
@@ -63,4 +78,15 @@ export function useFlowContextStore() {
 export function useFlowContext<T>(selector: (store: FlowContextStore) => T): T {
   const store = useFlowContextStore();
   return useStore(store, selector);
+}
+
+// Blocks are also shown outside the editor, e.g. in examples, where nothing
+// was changed by the AI.
+const emptyContextStore = createFlowContextStore();
+
+export function useChangedByAI(nodeId: string) {
+  const store = useContext(FlowContextStoreContext);
+  return useStore(store ?? emptyContextStore, (s) =>
+    s.aiChangedNodeIds.includes(nodeId)
+  );
 }

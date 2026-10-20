@@ -2,6 +2,9 @@ import FlowNodeEntryCommand from "@/components/flow/FlowNodeEntryCommand";
 import FlowEdgeDeleteButton from "@/components/flow/FlowEdgeDeleteButton";
 import FlowEdgeFixed from "@/components/flow/FlowEdgeFixed";
 import FlowNodeActionBase from "@/components/flow/FlowNodeActionBase";
+import { blockDefinitions } from "../blocks";
+import { BlockComponent } from "../blocks/types";
+import { ComponentType } from "react";
 import FlowNodeEntryEvent from "@/components/flow/FlowNodeEntryEvent";
 import FlowNodeConditionCompare from "@/components/flow/FlowNodeConditionCompare";
 import FlowNodeConditionItem from "@/components/flow/FlowNodeConditionItem";
@@ -19,77 +22,36 @@ import FlowNodeEntryComponentButton from "@/components/flow/FlowNodeEntryCompone
 import FlowNodeSuspendBase from "@/components/flow/FlowNodeSuspendBase";
 import FlowNodeActionMessage from "@/components/flow/FlowNodeActionMessage";
 import FlowNodeBase from "@/components/flow/FlowNodeBase";
-import FlowNodeControlErrorHandler from "@/components/flow/FlowNodeControlErrorHandler";
+import FlowNodeBranches from "@/components/flow/FlowNodeBranches";
 
-export const nodeTypes = {
+const blockComponents: Record<BlockComponent, ComponentType<any>> = {
+  action: FlowNodeActionBase,
+  action_message: FlowNodeActionMessage,
+  option: FlowNodeOptionBase,
+  option_command_argument: FlowNodeOptionCommandArgument,
   entry_command: FlowNodeEntryCommand,
   entry_event: FlowNodeEntryEvent,
   entry_component_button: FlowNodeEntryComponentButton,
-
-  option_command_argument: FlowNodeOptionCommandArgument,
-  option_command_permissions: FlowNodeOptionBase,
-  option_command_contexts: FlowNodeOptionBase,
-  option_event_filter: FlowNodeOptionBase,
-
-  action_response_create: FlowNodeActionMessage,
-  action_response_edit: FlowNodeActionMessage,
-  action_response_delete: FlowNodeActionBase,
-  action_response_defer: FlowNodeActionBase,
-  action_message_create: FlowNodeActionMessage,
-  action_message_edit: FlowNodeActionMessage,
-  action_message_delete: FlowNodeActionBase,
-  action_private_message_create: FlowNodeActionMessage,
-  action_message_reaction_create: FlowNodeActionBase,
-  action_message_reaction_delete: FlowNodeActionBase,
-  action_member_ban: FlowNodeActionBase,
-  action_member_unban: FlowNodeActionBase,
-  action_member_kick: FlowNodeActionBase,
-  action_member_timeout: FlowNodeActionBase,
-  action_member_edit: FlowNodeActionBase,
-  action_member_role_add: FlowNodeActionBase,
-  action_member_role_remove: FlowNodeActionBase,
-  action_member_get: FlowNodeActionBase,
-  action_user_get: FlowNodeActionBase,
-  action_channel_get: FlowNodeActionBase,
-  action_channel_create: FlowNodeActionBase,
-  action_channel_edit: FlowNodeActionBase,
-  action_channel_delete: FlowNodeActionBase,
-  action_thread_create: FlowNodeActionBase,
-  action_thread_member_add: FlowNodeActionBase,
-  action_thread_member_remove: FlowNodeActionBase,
-  action_forum_post_create: FlowNodeActionBase,
-  action_role_get: FlowNodeActionBase,
-  action_guild_get: FlowNodeActionBase,
-  action_message_get: FlowNodeActionBase,
-  action_roblox_user_get: FlowNodeActionBase,
-  action_variable_set: FlowNodeActionBase,
-  action_variable_delete: FlowNodeActionBase,
-  action_variable_get: FlowNodeActionBase,
-  action_http_request: FlowNodeActionBase,
-  action_ai_chat_completion: FlowNodeActionBase,
-  action_ai_web_search: FlowNodeActionBase,
-  action_expression_evaluate: FlowNodeActionBase,
-  action_random_generate: FlowNodeActionBase,
-  action_log: FlowNodeActionBase,
-
-  control_condition_compare: FlowNodeConditionCompare,
-  control_condition_item_compare: FlowNodeConditionItem,
-  control_condition_user: FlowNodeConditionUser,
-  control_condition_item_user: FlowNodeConditionItem,
-  control_condition_channel: FlowNodeConditionChannel,
-  control_condition_item_channel: FlowNodeConditionItem,
-  control_condition_role: FlowNodeConditionRole,
-  control_condition_item_role: FlowNodeConditionItem,
-  control_condition_item_else: FlowNodeConditionItem,
-  control_error_handler: FlowNodeControlErrorHandler,
+  condition_compare: FlowNodeConditionCompare,
+  condition_user: FlowNodeConditionUser,
+  condition_channel: FlowNodeConditionChannel,
+  condition_role: FlowNodeConditionRole,
+  condition_item: FlowNodeConditionItem,
   control_loop: FlowNodeControlLoop,
   control_loop_each: FlowNodeControlLoopEach,
   control_loop_end: FlowNodeControlLoopEnd,
   control_loop_exit: FlowNodeControlLoopExit,
   control_sleep: FlowNodeControlSleep,
-
-  suspend_response_modal: FlowNodeSuspendBase,
+  branches: FlowNodeBranches,
+  suspend: FlowNodeSuspendBase,
 };
+
+export const nodeTypes = Object.fromEntries(
+  blockDefinitions.map((block) => [
+    block.type,
+    blockComponents[block.component ?? "action"],
+  ])
+);
 
 export const edgeTypes = {
   delete_button: FlowEdgeDeleteButton,

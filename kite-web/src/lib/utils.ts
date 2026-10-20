@@ -1,5 +1,5 @@
 import { type ClassValue, clsx } from "clsx";
-import { formatRelative } from "date-fns";
+import { formatDuration, formatRelative, intervalToDuration } from "date-fns";
 import { twMerge } from "tailwind-merge";
 
 export function cn(...inputs: ClassValue[]) {
@@ -34,11 +34,11 @@ export function getUniqueId(): number {
 }
 
 export function formatTime(date: Date): string {
-  return date.toLocaleTimeString("en-US");
+  return date.toLocaleTimeString();
 }
 
 export function formatDate(date: Date): string {
-  return date.toLocaleDateString("en-US");
+  return date.toLocaleDateString();
 }
 
 export function formatDateTime(date: Date): string {
@@ -48,4 +48,8 @@ export function formatDateTime(date: Date): string {
 export function formatNumber(x: number | undefined | null) {
   if (!x) return "0";
   return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+export function formatInterval(seconds: number) {
+  return formatDuration(intervalToDuration({ start: 0, end: seconds * 1000 }));
 }

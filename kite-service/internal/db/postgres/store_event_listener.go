@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -35,12 +36,29 @@ func (c *Client) EventListenersByApp(ctx context.Context, appID string) ([]*mode
 	return listeners, nil
 }
 
-func (c *Client) CountEventListenersByApp(ctx context.Context, appID string) (int, error) {
-	res, err := c.Q.CountEventListenersByApp(ctx, appID)
+func (c *Client) CountEventListenersByAppAndSource(ctx context.Context, appID string, source model.EventSource) (int, error) {
+	res, err := c.Q.CountEventListenersByAppAndSource(ctx, pgmodel.CountEventListenersByAppAndSourceParams{
+		AppID:  appID,
+		Source: string(source),
+	})
 	if err != nil {
 		return 0, err
 	}
 	return int(res), nil
+}
+
+func (c *Client) UpdateEventListenersLastRunAt(ctx context.Context, lastRunAts map[string]time.Time) error {
+	ids := make([]string, 0, len(lastRunAts))
+	times := make([]pgtype.Timestamp, 0, len(lastRunAts))
+	for id, t := range lastRunAts {
+		ids = append(ids, id)
+		times = append(times, pgtype.Timestamp{Time: t.UTC(), Valid: true})
+	}
+
+	return c.Q.UpdateEventListenersLastRunAt(ctx, pgmodel.UpdateEventListenersLastRunAtParams{
+		Ids:        ids,
+		LastRunAts: times,
+	})
 }
 
 func (c *Client) EventListener(ctx context.Context, id string) (*model.EventListener, error) {
@@ -85,6 +103,10 @@ func (c *Client) CreateEventListener(ctx context.Context, listener *model.EventL
 		FlowSource:    flowSource,
 		CreatedAt:     pgtype.Timestamp{Time: listener.CreatedAt.UTC(), Valid: true},
 		UpdatedAt:     pgtype.Timestamp{Time: listener.UpdatedAt.UTC(), Valid: true},
+		WebhookSecret: pgtype.Text{
+			String: listener.WebhookSecret.String,
+			Valid:  listener.WebhookSecret.Valid,
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -126,26 +148,38 @@ func (c *Client) UpdateEventListener(ctx context.Context, listener *model.EventL
 	return rowToEventListener(row)
 }
 
-func (c *Client) EnabledEventListenersUpdatedSince(ctx context.Context, updatedSince time.Time) ([]*model.EventListener, error) {
-	rows, err := c.Q.GetEnabledEventListenersUpdatesSince(ctx, pgtype.Timestamp{
-		Time:  updatedSince.UTC(),
-		Valid: true,
+func (c *Client) UpdateEventListenerWebhookSecret(ctx context.Context, id string, secret string, updatedAt time.Time) (*model.EventListener, error) {
+	row, err := c.Q.UpdateEventListenerWebhookSecret(ctx, pgmodel.UpdateEventListenerWebhookSecretParams{
+		ID:            id,
+		WebhookSecret: pgtype.Text{String: secret, Valid: true},
+		UpdatedAt:     pgtype.Timestamp{Time: updatedAt.UTC(), Valid: true},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+
+	return rowToEventListener(row)
+}
+
+func (c *Client) EventListenersUpdatedSince(ctx context.Context, updatedSince time.Time) ([]*model.EventListener, error) {
+	rows, err := c.Q.GetEventListenersUpdatedSince(ctx, pgmodel.GetEventListenersUpdatedSinceParams{
+		UpdatedSince:    pgtype.Timestamp{Time: updatedSince.UTC(), Valid: true},
+		IncludeDisabled: !updatedSince.IsZero(),
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	listeners := make([]*model.EventListener, len(rows))
-	for i, row := range rows {
-		listener, err := rowToEventListener(row)
-		if err != nil {
-			return nil, err
-		}
+	return decodeRows(rows, rowToEventListener, func(row pgmodel.EventListener) []any {
+		return []any{slog.String("event_listener_id", row.ID), slog.String("app_id", row.AppID)}
+	}), nil
+}
 
-		listeners[i] = listener
-	}
-
-	return listeners, nil
+func (c *Client) EnabledScheduledEventListenerIDs(ctx context.Context) ([]string, error) {
+	return c.Q.GetEnabledScheduledEventListenerIDs(ctx)
 }
 
 func (c *Client) EnabledEventListenerIDs(ctx context.Context) ([]string, error) {
@@ -191,5 +225,7 @@ func rowToEventListener(row pgmodel.EventListener) (*model.EventListener, error)
 		FlowSource:    flowSource,
 		CreatedAt:     row.CreatedAt.Time,
 		UpdatedAt:     row.UpdatedAt.Time,
+		LastRunAt:     null.NewTime(row.LastRunAt.Time, row.LastRunAt.Valid),
+		WebhookSecret: null.NewString(row.WebhookSecret.String, row.WebhookSecret.Valid),
 	}, nil
 }

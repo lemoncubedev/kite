@@ -9,13 +9,16 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/diamondburned/arikawa/v3/api"
 	"github.com/diamondburned/arikawa/v3/discord"
+	"github.com/diamondburned/arikawa/v3/gateway"
 	"github.com/diamondburned/arikawa/v3/state"
 	disstore "github.com/diamondburned/arikawa/v3/state/store"
+	"github.com/diamondburned/arikawa/v3/utils/httputil"
 	"github.com/diamondburned/arikawa/v3/utils/sendpart"
 	"github.com/kitecloud/kite/kite-service/internal/model"
 	"github.com/kitecloud/kite/kite-service/internal/store"
@@ -24,17 +27,24 @@ import (
 	"github.com/kitecloud/kite/kite-service/pkg/message"
 	"github.com/kitecloud/kite/kite-service/pkg/provider"
 	"github.com/kitecloud/kite/kite-service/pkg/thing"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/v2"
+	"github.com/openai/openai-go/v2/responses"
+	"github.com/openai/openai-go/v2/shared"
 	"gopkg.in/guregu/null.v4"
 )
 
-type DiscordProvider struct {
-	provider.MockDiscordProvider // TODO: remove this
+// FeatureProvider resolves the premium features an app has access to.
+type FeatureProvider interface {
+	AppFeatures(ctx context.Context, appID string) model.Features
+	AppFeaturesForApps(ctx context.Context, appIDs []string) (map[string]model.Features, error)
+}
 
-	appID    string
-	appStore store.AppStore
-	session  *state.State
+type DiscordProvider struct {
+	appID           string
+	appStore        store.AppStore
+	featureProvider FeatureProvider
+	rateLimiter     *BlockRateLimiter
+	session         *state.State
 
 	interactionResponseMutex sync.Mutex
 	interactionsWithResponse map[discord.InteractionID]struct{}
@@ -43,12 +53,16 @@ type DiscordProvider struct {
 func NewDiscordProvider(
 	appID string,
 	appStore store.AppStore,
+	featureProvider FeatureProvider,
+	rateLimiter *BlockRateLimiter,
 	session *state.State,
 ) *DiscordProvider {
 	return &DiscordProvider{
-		appID:    appID,
-		appStore: appStore,
-		session:  session,
+		appID:           appID,
+		appStore:        appStore,
+		featureProvider: featureProvider,
+		rateLimiter:     rateLimiter,
+		session:         session,
 
 		interactionsWithResponse: make(map[discord.InteractionID]struct{}),
 	}
@@ -222,20 +236,6 @@ func (p *DiscordProvider) EditMessage(ctx context.Context, channelID discord.Cha
 	return msg, nil
 }
 
-func (p *DiscordProvider) DeleteMessage(
-	ctx context.Context,
-	channelID discord.ChannelID,
-	messageID discord.MessageID,
-	reason api.AuditLogReason,
-) error {
-	err := p.session.DeleteMessage(channelID, messageID, reason)
-	if err != nil {
-		return fmt.Errorf("failed to delete message: %w", err)
-	}
-
-	return nil
-}
-
 func (p *DiscordProvider) CreateMessageReaction(ctx context.Context, channelID discord.ChannelID, messageID discord.MessageID, emoji discord.APIEmoji) error {
 	err := p.session.React(channelID, messageID, emoji)
 	if err != nil {
@@ -245,66 +245,32 @@ func (p *DiscordProvider) CreateMessageReaction(ctx context.Context, channelID d
 	return nil
 }
 
-func (p *DiscordProvider) DeleteMessageReaction(ctx context.Context, channelID discord.ChannelID, messageID discord.MessageID, emoji discord.APIEmoji) error {
-	err := p.session.Unreact(channelID, messageID, emoji)
-	if err != nil {
-		return fmt.Errorf("failed to delete message reaction: %w", err)
+func (p *DiscordProvider) CreatePoll(ctx context.Context, channelID discord.ChannelID, data provider.CreatePollData) (*discord.Message, error) {
+	// arikawa's SendMessageData has no poll field, so the request is built by hand.
+	body := struct {
+		Poll provider.CreatePollData `json:"poll"`
+	}{
+		Poll: data,
 	}
 
-	return nil
-}
-
-func (p *DiscordProvider) BanMember(ctx context.Context, guildID discord.GuildID, userID discord.UserID, data api.BanData) error {
-	err := p.session.Ban(guildID, userID, data)
+	var msg discord.Message
+	err := p.session.RequestJSON(
+		&msg,
+		http.MethodPost,
+		api.EndpointChannels+channelID.String()+"/messages",
+		httputil.WithJSONBody(body),
+	)
 	if err != nil {
-		return fmt.Errorf("failed to ban member: %w", err)
+		return nil, fmt.Errorf("failed to create poll: %w", err)
 	}
 
-	return nil
-}
-
-func (p *DiscordProvider) UnbanMember(ctx context.Context, guildID discord.GuildID, userID discord.UserID, reason api.AuditLogReason) error {
-	err := p.session.Unban(guildID, userID, reason)
-	if err != nil {
-		return fmt.Errorf("failed to unban member: %w", err)
-	}
-
-	return nil
-}
-
-func (p *DiscordProvider) KickMember(ctx context.Context, guildID discord.GuildID, userID discord.UserID, reason api.AuditLogReason) error {
-	err := p.session.Kick(guildID, userID, reason)
-	if err != nil {
-		return fmt.Errorf("failed to kick member: %w", err)
-	}
-
-	return nil
+	return &msg, nil
 }
 
 func (p *DiscordProvider) EditMember(ctx context.Context, guildID discord.GuildID, userID discord.UserID, data api.ModifyMemberData) error {
 	err := p.session.ModifyMember(guildID, userID, data)
 	if err != nil {
 		return fmt.Errorf("failed to edit member: %w", err)
-	}
-
-	return nil
-}
-
-func (p *DiscordProvider) AddMemberRole(ctx context.Context, guildID discord.GuildID, userID discord.UserID, roleID discord.RoleID, reason api.AuditLogReason) error {
-	err := p.session.AddRole(guildID, userID, roleID, api.AddRoleData{
-		AuditLogReason: reason,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to add role: %w", err)
-	}
-
-	return nil
-}
-
-func (p *DiscordProvider) RemoveMemberRole(ctx context.Context, guildID discord.GuildID, userID discord.UserID, roleID discord.RoleID, reason api.AuditLogReason) error {
-	err := p.session.RemoveRole(guildID, userID, roleID, reason)
-	if err != nil {
-		return fmt.Errorf("failed to remove role: %w", err)
 	}
 
 	return nil
@@ -337,15 +303,6 @@ func (p *DiscordProvider) EditChannel(ctx context.Context, channelID discord.Cha
 	return nil
 }
 
-func (p *DiscordProvider) DeleteChannel(ctx context.Context, channelID discord.ChannelID, reason api.AuditLogReason) error {
-	err := p.session.DeleteChannel(channelID, reason)
-	if err != nil {
-		return fmt.Errorf("failed to delete channel: %w", err)
-	}
-
-	return nil
-}
-
 func (p *DiscordProvider) StartThreadWithMessage(ctx context.Context, channelID discord.ChannelID, messageID discord.MessageID, data api.StartThreadData) (*discord.Channel, error) {
 	thread, err := p.session.StartThreadWithMessage(channelID, messageID, data)
 	if err != nil {
@@ -364,22 +321,119 @@ func (p *DiscordProvider) StartThreadWithoutMessage(ctx context.Context, channel
 	return thread, nil
 }
 
-func (p *DiscordProvider) AddThreadMember(ctx context.Context, channelID discord.ChannelID, userID discord.UserID) error {
-	err := p.session.AddThreadMember(channelID, userID)
+func (p *DiscordProvider) StartThreadInForum(ctx context.Context, channelID discord.ChannelID, data api.StartForumThreadData) (*discord.Channel, error) {
+	thread, err := p.session.StartThreadInForum(channelID, data)
 	if err != nil {
-		return fmt.Errorf("failed to add thread member: %w", err)
+		return nil, fmt.Errorf("failed to start thread in forum: %w", err)
+	}
+
+	return thread, nil
+}
+
+func (p *DiscordProvider) APIRequest(ctx context.Context, req provider.DiscordAPIRequest) ([]byte, error) {
+	// Going through the session's client adds the token and shares its rate
+	// limiter with every other request of the app.
+	opts := []httputil.RequestOption{httputil.WithHeaders(req.Reason.Header())}
+	if req.Body != nil {
+		opts = append(opts, httputil.JSONRequest, httputil.WithBodyBytes(req.Body))
+	}
+
+	resp, err := p.session.Client.WithContext(ctx).Request(
+		req.Method,
+		api.Endpoint+strings.TrimPrefix(req.Path, "/"),
+		opts...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send Discord API request: %w", err)
+	}
+
+	body := resp.GetBody()
+	defer body.Close()
+
+	data, err := io.ReadAll(io.LimitReader(body, thing.MaxBodySize+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read Discord API response: %w", err)
+	}
+	if len(data) > thing.MaxBodySize {
+		return nil, fmt.Errorf("body size exceeds max body size of %d bytes", thing.MaxBodySize)
+	}
+
+	return data, nil
+}
+
+func (p *DiscordProvider) UpdateVoiceState(ctx context.Context, guildID discord.GuildID, channelID discord.ChannelID, selfMute bool, selfDeaf bool) error {
+	if err := p.allowGatewayCommand(); err != nil {
+		return err
+	}
+
+	err := p.session.SendGateway(ctx, &gateway.UpdateVoiceStateCommand{
+		GuildID:   guildID,
+		ChannelID: channelID,
+		SelfMute:  selfMute,
+		SelfDeaf:  selfDeaf,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update voice state: %w", err)
 	}
 
 	return nil
 }
 
-func (p *DiscordProvider) RemoveThreadMember(ctx context.Context, channelID discord.ChannelID, userID discord.UserID) error {
-	err := p.session.RemoveThreadMember(channelID, userID)
+func (p *DiscordProvider) UpdatePresence(ctx context.Context, status discord.Status, activity discord.Activity) error {
+	// Part of the same premium feature as rotating statuses in the app settings
+	if !p.featureProvider.AppFeatures(ctx, p.appID).RotatingStatus {
+		return fmt.Errorf("setting the status from a flow requires premium")
+	}
+	if err := p.allowGatewayCommand(); err != nil {
+		return err
+	}
+
+	err := p.session.SendGateway(ctx, &gateway.UpdatePresenceCommand{
+		Status:     status,
+		Activities: []discord.Activity{activity},
+	})
 	if err != nil {
-		return fmt.Errorf("failed to remove thread member: %w", err)
+		return fmt.Errorf("failed to update presence: %w", err)
 	}
 
 	return nil
+}
+
+func (p *DiscordProvider) allowGatewayCommand() error {
+	if !p.rateLimiter.Allow(p.appID, gatewayCommandRateLimit) {
+		return fmt.Errorf("blocks that change the status or voice state are rate limited, try again in a few seconds")
+	}
+	return nil
+}
+
+func (p *DiscordProvider) AppVerifyKey(ctx context.Context) (string, error) {
+	app, err := p.appStore.App(ctx, p.appID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get app: %w", err)
+	}
+	if app.DiscordVerifyKey.Valid {
+		return app.DiscordVerifyKey.String, nil
+	}
+
+	// Fetched the first time it's needed, as it never changes.
+	discordApp, err := p.session.Client.WithContext(ctx).CurrentApplication()
+	if err != nil {
+		return "", fmt.Errorf("failed to get the app's public key from Discord: %w", err)
+	}
+	if err := p.appStore.UpdateAppDiscordVerifyKey(ctx, p.appID, discordApp.VerifyKey); err != nil {
+		slog.Error(
+			"Failed to store app verify key",
+			slog.String("app_id", p.appID),
+			slog.String("error", err.Error()),
+		)
+	}
+	return discordApp.VerifyKey, nil
+}
+
+func (p *DiscordProvider) MarkInteractionResponded(interactionID discord.InteractionID) {
+	p.interactionResponseMutex.Lock()
+	defer p.interactionResponseMutex.Unlock()
+	p.interactionsWithResponse[interactionID] = struct{}{}
 }
 
 func (p *DiscordProvider) HasCreatedInteractionResponse(ctx context.Context, interactionID discord.InteractionID) (bool, error) {
@@ -394,7 +448,7 @@ func (p *DiscordProvider) AutoDeferInteraction(
 	ctx context.Context,
 	interactionID discord.InteractionID,
 	interactionToken string,
-	flags discord.MessageFlags,
+	response api.InteractionResponse,
 ) {
 	select {
 	case <-ctx.Done():
@@ -406,12 +460,7 @@ func (p *DiscordProvider) AutoDeferInteraction(
 		}
 
 		if !hasCreatedResponse {
-			_, err := p.CreateInteractionResponse(ctx, interactionID, interactionToken, api.InteractionResponse{
-				Type: api.DeferredMessageInteractionWithSource,
-				Data: &api.InteractionResponseData{
-					Flags: flags,
-				},
-			})
+			_, err := p.CreateInteractionResponse(ctx, interactionID, interactionToken, response)
 			if err != nil {
 				slog.Error(
 					"Failed to auto-defer interaction",
@@ -474,6 +523,14 @@ func (p *HTTPProvider) HTTPRequest(ctx context.Context, req *http.Request) (*htt
 	return p.client.Do(req)
 }
 
+func (p *HTTPProvider) HTTPRequestWithoutRedirects(ctx context.Context, req *http.Request) (*http.Response, error) {
+	client := *p.client
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return client.Do(req)
+}
+
 type AIProvider struct {
 	client *openai.Client
 }
@@ -488,12 +545,8 @@ func (p *AIProvider) CreateResponse(ctx context.Context, opts provider.CreateRes
 	tools := []responses.ToolUnionParam{}
 	for _, tool := range opts.Tools {
 		switch tool {
-		case provider.AIToolTypeWebSearchPreview:
-			tools = append(tools, responses.ToolUnionParam{
-				OfWebSearchPreview: &responses.WebSearchToolParam{
-					Type: responses.WebSearchToolTypeWebSearchPreview,
-				},
-			})
+		case provider.AIToolTypeWebSearch:
+			tools = append(tools, responses.ToolParamOfWebSearch(responses.WebSearchToolTypeWebSearch))
 		}
 	}
 
@@ -518,37 +571,46 @@ func (p *AIProvider) CreateResponse(ctx context.Context, opts provider.CreateRes
 		})
 	}
 
-	model := opts.Model
-	if model == "" {
-		model = openai.ChatModelGPT4oMini
-	}
-
-	maxOutputTokens := 500
-	if opts.MaxOutputTokens > 0 && opts.MaxOutputTokens < maxOutputTokens {
-		maxOutputTokens = opts.MaxOutputTokens
-	}
-
-	resp, err := p.client.Responses.New(ctx, responses.ResponseNewParams{
-		Model: model,
+	params := responses.ResponseNewParams{
+		Model: opts.Model,
 		Input: responses.ResponseNewParamsInputUnion{
 			OfInputItemList: inputs,
 		},
-		MaxOutputTokens: openai.Int(int64(maxOutputTokens)),
-		Tools:           tools,
-	})
+		Tools: tools,
+	}
+	if opts.MaxOutputTokens > 0 {
+		params.MaxOutputTokens = openai.Int(int64(opts.MaxOutputTokens))
+	}
+	if opts.ReasoningEffort != "" {
+		params.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffort(opts.ReasoningEffort)}
+	}
+	if opts.MaxToolCalls > 0 {
+		params.MaxToolCalls = openai.Int(int64(opts.MaxToolCalls))
+	}
+
+	resp, err := p.client.Responses.New(ctx, params)
 	if err != nil {
 		return "", fmt.Errorf("failed to create response: %w", err)
 	}
 
-	return resp.OutputText(), nil
+	// Reasoning can use up the whole token budget and leave no answer, which
+	// would otherwise pass as an empty but successful one.
+	text := resp.OutputText()
+	if text == "" && resp.Status == responses.ResponseStatusIncomplete {
+		return "", fmt.Errorf("response incomplete: %s", resp.IncompleteDetails.Reason)
+	}
+	return text, nil
 }
 
+// Variable IDs come from user-authored flow data, so lookups are scoped to the app.
 type VariableProvider struct {
+	appID              string
 	variableValueStore store.VariableValueStore
 }
 
-func NewVariableProvider(variableValueStore store.VariableValueStore) *VariableProvider {
+func NewVariableProvider(appID string, variableValueStore store.VariableValueStore) *VariableProvider {
 	return &VariableProvider{
+		appID:              appID,
 		variableValueStore: variableValueStore,
 	}
 }
@@ -562,7 +624,7 @@ func (p *VariableProvider) UpdateVariable(ctx context.Context, id string, scope 
 		UpdatedAt:  time.Now().UTC(),
 	}
 
-	newValue, err := p.variableValueStore.UpdateVariableValue(ctx, operation, v)
+	newValue, err := p.variableValueStore.UpdateVariableValue(ctx, p.appID, operation, v)
 	if err != nil {
 		return thing.Null, fmt.Errorf("failed to %s variable value: %w", operation, err)
 	}
@@ -571,7 +633,7 @@ func (p *VariableProvider) UpdateVariable(ctx context.Context, id string, scope 
 }
 
 func (p *VariableProvider) Variable(ctx context.Context, id string, scope null.String) (thing.Thing, error) {
-	row, err := p.variableValueStore.VariableValue(ctx, id, scope)
+	row, err := p.variableValueStore.VariableValue(ctx, p.appID, id, scope)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return thing.Null, provider.ErrNotFound
@@ -583,7 +645,7 @@ func (p *VariableProvider) Variable(ctx context.Context, id string, scope null.S
 }
 
 func (p *VariableProvider) DeleteVariable(ctx context.Context, id string, scope null.String) error {
-	err := p.variableValueStore.DeleteVariableValue(ctx, id, scope)
+	err := p.variableValueStore.DeleteVariableValue(ctx, p.appID, id, scope)
 	if err != nil {
 		return fmt.Errorf("failed to delete variable value: %w", err)
 	}
@@ -592,19 +654,23 @@ func (p *VariableProvider) DeleteVariable(ctx context.Context, id string, scope 
 }
 
 type MessageTemplateProvider struct {
+	// Template IDs come from user-authored flow data, so lookups are scoped to
+	// the app to keep a flow from using another app's templates.
+	appID                string
 	messageStore         store.MessageStore
 	messageInstanceStore store.MessageInstanceStore
 }
 
-func NewMessageTemplateProvider(messageStore store.MessageStore, messageInstanceStore store.MessageInstanceStore) *MessageTemplateProvider {
+func NewMessageTemplateProvider(appID string, messageStore store.MessageStore, messageInstanceStore store.MessageInstanceStore) *MessageTemplateProvider {
 	return &MessageTemplateProvider{
+		appID:                appID,
 		messageStore:         messageStore,
 		messageInstanceStore: messageInstanceStore,
 	}
 }
 
 func (p *MessageTemplateProvider) MessageTemplate(ctx context.Context, id string) (*message.MessageData, error) {
-	message, err := p.messageStore.Message(ctx, id)
+	message, err := p.messageStore.Message(ctx, p.appID, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get message: %w", err)
 	}
@@ -613,12 +679,12 @@ func (p *MessageTemplateProvider) MessageTemplate(ctx context.Context, id string
 }
 
 func (p *MessageTemplateProvider) LinkMessageTemplateInstance(ctx context.Context, instance provider.MessageTemplateInstance) error {
-	message, err := p.messageStore.Message(ctx, instance.MessageTemplateID)
+	message, err := p.messageStore.Message(ctx, p.appID, instance.MessageTemplateID)
 	if err != nil {
 		return fmt.Errorf("failed to get message: %w", err)
 	}
 
-	_, err = p.messageInstanceStore.CreateMessageInstance(ctx, &model.MessageInstance{
+	_, err = p.messageInstanceStore.CreateMessageInstance(ctx, p.appID, &model.MessageInstance{
 		MessageID:        message.ID,
 		DiscordMessageID: instance.MessageID.String(),
 		DiscordChannelID: instance.ChannelID.String(),
@@ -636,8 +702,17 @@ func (p *MessageTemplateProvider) LinkMessageTemplateInstance(ctx context.Contex
 	return nil
 }
 
+// maxPendingTimers bounds the durable sleeps an app can have waiting, a busy
+// listener could otherwise create one for every message.
+const maxPendingTimers = 1000
+
+// timerExpiry is how long after resume_at a timer that couldn't resume, e.g.
+// because the app's gateway was down, is kept before it's deleted.
+const timerExpiry = time.Hour
+
 type ResumePointProvider struct {
 	resumePointStore store.ResumePointStore
+	tokenCrypt       *util.SymmetricCrypt
 
 	appID string
 	links entityLinks
@@ -645,14 +720,38 @@ type ResumePointProvider struct {
 
 func NewResumePointProvider(
 	resumePointStore store.ResumePointStore,
+	tokenCrypt *util.SymmetricCrypt,
 	appID string,
 	links entityLinks,
 ) *ResumePointProvider {
 	return &ResumePointProvider{
 		resumePointStore: resumePointStore,
+		tokenCrypt:       tokenCrypt,
 		appID:            appID,
 		links:            links,
 	}
+}
+
+// timerFields checks the app's limit of pending timers and prepares the
+// columns only timers have.
+func (p *ResumePointProvider) timerFields(ctx context.Context, s flow.ResumePoint) (resumeAt, expiresAt null.Time, interactionToken null.String, err error) {
+	pending, err := p.resumePointStore.CountPendingTimerResumePoints(ctx, p.appID)
+	if err != nil {
+		return resumeAt, expiresAt, interactionToken, fmt.Errorf("failed to count pending timers: %w", err)
+	}
+	if pending >= maxPendingTimers {
+		return resumeAt, expiresAt, interactionToken, fmt.Errorf("too many sleeping flows, at most %d can wait at the same time", maxPendingTimers)
+	}
+
+	if s.InteractionToken != "" {
+		token, err := p.tokenCrypt.EncryptString(s.InteractionToken)
+		if err != nil {
+			return resumeAt, expiresAt, interactionToken, fmt.Errorf("failed to encrypt interaction token: %w", err)
+		}
+		interactionToken = null.StringFrom(token)
+	}
+
+	return null.TimeFrom(s.ResumeAt), null.TimeFrom(s.ResumeAt.Add(timerExpiry)), interactionToken, nil
 }
 
 func (p *ResumePointProvider) CreateResumePoint(ctx context.Context, s flow.ResumePoint) (flow.ResumePoint, error) {
@@ -660,9 +759,17 @@ func (p *ResumePointProvider) CreateResumePoint(ctx context.Context, s flow.Resu
 		s.ID = util.UniqueID()
 	}
 
-	var expiresAt null.Time
-	if s.Type == flow.ResumePointTypeModal {
+	var expiresAt, resumeAt null.Time
+	var interactionToken null.String
+	switch s.Type {
+	case flow.ResumePointTypeModal:
 		expiresAt = null.NewTime(time.Now().UTC().Add(time.Hour*1), true)
+	case flow.ResumePointTypeTimer:
+		var err error
+		resumeAt, expiresAt, interactionToken, err = p.timerFields(ctx, s)
+		if err != nil {
+			return s, err
+		}
 	}
 
 	// TODO: Implement some kind of expiration for other resume point types
@@ -681,6 +788,8 @@ func (p *ResumePointProvider) CreateResumePoint(ctx context.Context, s flow.Resu
 		FlowState:         s.State,
 		CreatedAt:         time.Now().UTC(),
 		ExpiresAt:         expiresAt,
+		ResumeAt:          resumeAt,
+		InteractionToken:  interactionToken,
 	})
 
 	return s, err
@@ -811,4 +920,129 @@ func (p *RobloxProvider) UsersByUsername(ctx context.Context, username string) (
 	}
 
 	return v.Data, nil
+}
+
+type SecretProvider struct {
+	appID          string
+	appSecretStore store.AppSecretStore
+	tokenCrypt     *util.SymmetricCrypt
+
+	// Decrypted secrets, as a flow can send the same request many times.
+	mu     sync.Mutex
+	values map[string]string
+}
+
+func NewSecretProvider(appID string, appSecretStore store.AppSecretStore, tokenCrypt *util.SymmetricCrypt) *SecretProvider {
+	return &SecretProvider{
+		appID:          appID,
+		appSecretStore: appSecretStore,
+		tokenCrypt:     tokenCrypt,
+	}
+}
+
+// Secrets only decrypts the secrets a flow uses.
+func (p *SecretProvider) Secrets(ctx context.Context, names []string) (map[string]string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var missing []string
+	for _, name := range names {
+		if _, ok := p.values[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+
+	if len(missing) > 0 {
+		secrets, err := p.appSecretStore.AppSecretsByNames(ctx, p.appID, missing)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get secrets: %w", err)
+		}
+
+		if p.values == nil {
+			p.values = make(map[string]string, len(secrets))
+		}
+		for _, secret := range secrets {
+			value, err := p.tokenCrypt.DecryptString(secret.ValueEncrypted)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decrypt secret %s: %w", secret.Name, err)
+			}
+			p.values[secret.Name] = value
+		}
+	}
+
+	res := make(map[string]string, len(names))
+	for _, name := range names {
+		if value, ok := p.values[name]; ok {
+			res[name] = value
+		}
+	}
+	return res, nil
+}
+
+type IntegrationProvider struct {
+	appID               string
+	appSecretStore      store.AppSecretStore
+	appIntegrationStore store.AppIntegrationStore
+	tokenCrypt          *util.SymmetricCrypt
+
+	// Loaded once per run, as blocks in loops need them again and again.
+	mu          sync.Mutex
+	choices     map[string]bool
+	credentials map[string]string
+}
+
+func NewIntegrationProvider(appID string, appSecretStore store.AppSecretStore, appIntegrationStore store.AppIntegrationStore, tokenCrypt *util.SymmetricCrypt) *IntegrationProvider {
+	return &IntegrationProvider{
+		appID:               appID,
+		appSecretStore:      appSecretStore,
+		appIntegrationStore: appIntegrationStore,
+		tokenCrypt:          tokenCrypt,
+	}
+}
+
+func (p *IntegrationProvider) Choice(ctx context.Context, integrationID string) (null.Bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.choices == nil {
+		rows, err := p.appIntegrationStore.AppIntegrations(ctx, p.appID)
+		if err != nil {
+			return null.Bool{}, fmt.Errorf("failed to get integrations: %w", err)
+		}
+		p.choices = make(map[string]bool, len(rows))
+		for _, row := range rows {
+			p.choices[row.IntegrationID] = row.Enabled
+		}
+	}
+
+	enabled, ok := p.choices[integrationID]
+	return null.NewBool(enabled, ok), nil
+}
+
+func (p *IntegrationProvider) Credential(ctx context.Context, integrationID string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if value, ok := p.credentials[integrationID]; ok {
+		return value, nil
+	}
+
+	secret, err := p.appSecretStore.AppIntegrationCredential(ctx, p.appID, integrationID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", provider.ErrNotFound
+		}
+		return "", fmt.Errorf("failed to get credential: %w", err)
+	}
+
+	value, err := p.tokenCrypt.DecryptString(secret.ValueEncrypted)
+	if err != nil {
+		return "", fmt.Errorf("failed to decrypt credential: %w", err)
+	}
+
+	if p.credentials == nil {
+		p.credentials = map[string]string{}
+	}
+	p.credentials[integrationID] = value
+	return value, nil
 }

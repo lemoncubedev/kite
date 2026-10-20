@@ -21,6 +21,7 @@ The output of previously executed blocks is available in all subsequent blocks a
 - [Delete response message](./actions/action_response_delete.md) - Delete response messages
 - [Show Modal](./actions/suspend_response_modal.md) - Show modal dialogs to users
 - [Defer response](./actions/action_response_defer.md) - Defer response for longer processing
+- [Respond to webhook](./actions/action_webhook_response_create.md) - Answer the request of a webhook event listener
 
 ## Message Blocks
 
@@ -28,9 +29,15 @@ The output of previously executed blocks is available in all subsequent blocks a
 - [Edit channel message](./actions/action_message_edit.md) - Edit channel messages
 - [Delete channel message](./actions/action_message_delete.md) - Delete channel messages
 - [Get channel message](./actions/action_message_get.md) - Retrieve channel messages
+- [List channel messages](./actions/action_message_list.md) - Get the latest messages of a channel
+- [Bulk delete messages](./actions/action_message_bulk_delete.md) - Delete up to 100 messages at once
 - [Send direct message](./actions/action_private_message_create.md) - Send private messages
+- [Show typing](./actions/action_typing_trigger.md) - Show the app as typing in a channel
 - [Create message reaction](./actions/action_message_reaction_create.md) - Add reactions to messages
 - [Delete message reaction](./actions/action_message_reaction_delete.md) - Remove reactions from messages
+- [Pin channel message](./actions/action_message_pin.md) - Pin messages in channels
+- [Unpin channel message](./actions/action_message_unpin.md) - Unpin messages in channels
+- [Create poll](./actions/action_poll_create.md) - Send polls to channels
 
 ## User & Member Blocks
 
@@ -47,8 +54,20 @@ The output of previously executed blocks is available in all subsequent blocks a
 ## Server & Channel Blocks
 
 - [Get role](./actions/action_role_get.md) - Retrieve role information
+- [Create role](./actions/action_role_create.md) - Create roles in servers
 - [Get server](./actions/action_guild_get.md) - Get server information
 - [Get channel](./actions/action_channel_get.md) - Retrieve channel information
+- [Create invite](./actions/action_invite_create.md) - Create invite links for channels
+- [Create forum post](./actions/action_forum_post_create.md) - Create posts in forum and media channels
+
+## Voice Blocks
+
+- [Join voice channel](./actions/action_voice_channel_join.md) - Make the app join a voice channel
+- [Leave voice channel](./actions/action_voice_channel_leave.md) - Make the app leave its voice channel
+
+## Bot Blocks
+
+- [Set status](./actions/action_status_set.md) - Change the app's status and activity
 
 ## Variable Blocks
 
@@ -65,12 +84,21 @@ The output of previously executed blocks is available in all subsequent blocks a
 
 - [Calculate Value](./actions/action_expression_evaluate.md) - Evaluate expressions and calculations
 - [Generate Random Number](./actions/action_random_generate.md) - Generate random numbers
-- [Send API Request](./actions/action_http_request.md) - Make HTTP requests
 - [Log Message](./actions/action_log.md) - Log messages for debugging
+
+## API Request Blocks
+
+- [Send API Request](./actions/action_http_request.md) - Make HTTP requests
+- [Discord API Request](./actions/action_discord_api_request.md) - Call any endpoint of the Discord API
 
 ## Roblox Blocks
 
 - [Get Roblox User](./actions/action_roblox_user_get.md) - Retrieve Roblox user information
+
+## ER:LC Blocks
+
+- [Get ER:LC server](./actions/action_erlc_server_get.md) - Get the status, players and logs of an ER:LC private server
+- [Run ER:LC command](./actions/action_erlc_command_run.md) - Run a command in an ER:LC private server
 
 ## Control Flow Blocks
 
@@ -78,6 +106,7 @@ The output of previously executed blocks is available in all subsequent blocks a
 - [User Condition](./controls/control_condition_user.md) - User-based conditions
 - [Channel Condition](./controls/control_condition_channel.md) - Channel-based conditions
 - [Role Condition](./controls/control_condition_role.md) - Role-based conditions
+- [Verify webhook signature](./controls/control_webhook_verify.md) - Check that a webhook request comes from the service that signs it
 - [Run a loop](./controls/control_loop.md) - Execute actions multiple times
 - [Exit loop](./controls/control_loop_exit.md) - Exit loops early
 - [Wait](./controls/control_sleep.md) - Pause flow execution
@@ -86,6 +115,7 @@ The output of previously executed blocks is available in all subsequent blocks a
 
 - [Command Argument](./options/option_command_argument.md) - Define command arguments
 - [Command Permissions](./options/option_command_permissions.md) - Set command permissions
+- [Command Cooldown](./options/option_command_cooldown.md) - Limit how often a command can be used
 - [Command Contexts](./options/option_command_contexts.md) - Define command availability
 
 ## Event Options

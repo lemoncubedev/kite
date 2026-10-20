@@ -94,6 +94,12 @@ func (p *pluginInstance) WantsEvent(event gateway.Event) bool {
 		return true
 	}
 
+	// Plugins were written for servers. DMs only arrive when the app has a
+	// direct message listener, and are meant for that listener.
+	if isDirectMessageEvent(event) {
+		return false
+	}
+
 	return p.eventTypes[event.EventType()]
 }
 
@@ -130,7 +136,7 @@ func (p *pluginInstance) pluginContext(ctx context.Context, session *state.State
 		Context:       ctx,
 		ValueProvider: NewValueProvider(p.model.ID, p.env.PluginValueStore),
 		appID:         p.model.AppID,
-		discord:       NewDiscordProvider(p.model.AppID, p.env.AppStore, session),
+		discord:       NewDiscordProvider(p.model.AppID, p.env.AppStore, p.env.FeatureProvider, p.env.BlockRateLimiter, session),
 	}
 }
 

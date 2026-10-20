@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQueries, useQuery } from "@tanstack/react-query";
 import { apiRequest } from "./client";
 import {
   AppCollaboratorListResponse,
@@ -6,6 +6,7 @@ import {
   AppEntityListResponse,
   AppGetResponse,
   AppListResponse,
+  AppSetupGetResponse,
   AssetGetResponse,
   BillingPlanListResponse,
   CommandGetResponse,
@@ -13,6 +14,7 @@ import {
   EventListenerGetResponse,
   EventListenerListResponse,
   FeaturesGetResponse,
+  FlowAIUsageGetResponse,
   LogEntry,
   LogEntryListResponse,
   LogSummaryGetResponse,
@@ -23,6 +25,7 @@ import {
   PluginInstanceListResponse,
   PluginListResponse,
   StateGuildChannelListResponse,
+  StateGuildRoleListResponse,
   StateGuildListResponse,
   StateStatusGetResponse,
   SubscriptionListResponse,
@@ -32,6 +35,10 @@ import {
   UserGetResponse,
   VariableGetResponse,
   VariableListResponse,
+  VariableValueListResponse,
+  AppSecretListResponse,
+  AppIntegrationListResponse,
+  StatsGetResponse,
 } from "../types/wire.gen";
 
 export function useUserQuery(userId = "@me") {
@@ -42,10 +49,20 @@ export function useUserQuery(userId = "@me") {
   });
 }
 
-export function useAppsQuery() {
+export function useStatsQuery() {
+  return useQuery({
+    queryKey: ["stats"],
+    queryFn: () => apiRequest<StatsGetResponse>(`/v1/stats`),
+    // The API only updates them once an hour.
+    staleTime: 60 * 60 * 1000,
+  });
+}
+
+export function useAppsQuery(enabled = true) {
   return useQuery({
     queryKey: ["apps"],
     queryFn: () => apiRequest<AppListResponse>(`/v1/apps`),
+    enabled,
   });
 }
 
@@ -54,6 +71,11 @@ export function useAppQuery(appId: string) {
     queryKey: ["apps", appId],
     queryFn: () => apiRequest<AppGetResponse>(`/v1/apps/${appId}`),
     enabled: !!appId,
+    // Changed commands are deployed to Discord in the background.
+    refetchInterval: (query) => {
+      const app = query.state.data?.success ? query.state.data.data : null;
+      return app?.commands_deploy_pending && app.enabled ? 3000 : false;
+    },
   });
 }
 
@@ -82,6 +104,7 @@ export function useLogEntriesQuery(
     eventId?: string;
     messageId?: string;
     refetchInterval?: number;
+    enabled?: boolean;
   }
 ) {
   const query = new URLSearchParams();
@@ -103,7 +126,7 @@ export function useLogEntriesQuery(
     queryFn: () =>
       apiRequest<LogEntry[]>(`/v1/apps/${appId}/logs?${query.toString()}`),
     staleTime: 1000 * 60,
-    enabled: !!appId,
+    enabled: !!appId && (args?.enabled ?? true),
     refetchInterval: args?.refetchInterval,
   });
 }
@@ -193,6 +216,24 @@ export function useVariablesQuery(appId: string) {
   });
 }
 
+export function useAppIntegrationsQuery(appId: string) {
+  return useQuery({
+    queryKey: ["apps", appId, "integrations"],
+    queryFn: () =>
+      apiRequest<AppIntegrationListResponse>(`/v1/apps/${appId}/integrations`),
+    enabled: !!appId,
+  });
+}
+
+export function useAppSecretsQuery(appId: string) {
+  return useQuery({
+    queryKey: ["apps", appId, "secrets"],
+    queryFn: () =>
+      apiRequest<AppSecretListResponse>(`/v1/apps/${appId}/secrets`),
+    enabled: !!appId,
+  });
+}
+
 export function useVariableQuery(appId: string, variableId: string) {
   return useQuery({
     queryKey: ["apps", appId, "variables", variableId],
@@ -201,6 +242,29 @@ export function useVariableQuery(appId: string, variableId: string) {
         `/v1/apps/${appId}/variables/${variableId}`
       ),
     enabled: !!appId && !!variableId,
+  });
+}
+
+export function useVariableValuesQuery(
+  appId: string,
+  variableId: string,
+  params: { search: string; limit: number; offset: number }
+) {
+  return useQuery({
+    queryKey: ["apps", appId, "variables", variableId, "values", params],
+    queryFn: () => {
+      const query = new URLSearchParams({
+        search: params.search,
+        limit: params.limit.toString(),
+        offset: params.offset.toString(),
+      });
+      return apiRequest<VariableValueListResponse>(
+        `/v1/apps/${appId}/variables/${variableId}/values?${query}`
+      );
+    },
+    enabled: !!appId && !!variableId,
+    // Keeps the current page visible while the next one or a search loads.
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -222,23 +286,55 @@ export function useMessageQuery(appId: string, messageId: string) {
   });
 }
 
-export function useMessageInstancesQuery(appId: string, messageId: string) {
+export function useMessageInstancesQuery(
+  appId: string,
+  messageId: string,
+  sentBy?: "flow",
+  enabled = true
+) {
   return useQuery({
-    queryKey: ["apps", appId, "messages", messageId, "instances"],
+    queryKey: [
+      "apps",
+      appId,
+      "messages",
+      messageId,
+      "instances",
+      ...(sentBy ? [sentBy] : []),
+    ],
     queryFn: () =>
       apiRequest<MessageInstanceListResponse>(
-        `/v1/apps/${appId}/messages/${messageId}/instances`
+        `/v1/apps/${appId}/messages/${messageId}/instances` +
+          (sentBy ? `?sent_by=${sentBy}` : "")
       ),
-    enabled: !!appId && !!messageId,
+    enabled: enabled && !!appId && !!messageId,
   });
 }
 
-export function useAssetQuery(appId: string, assetId: string) {
-  return useQuery({
+function assetQueryOptions(appId: string, assetId: string) {
+  return {
     queryKey: ["apps", appId, "assets", assetId],
     queryFn: () =>
       apiRequest<AssetGetResponse>(`/v1/apps/${appId}/assets/${assetId}`),
     enabled: !!appId && !!assetId,
+  };
+}
+
+export function useAssetQuery(appId: string, assetId: string) {
+  return useQuery(assetQueryOptions(appId, assetId));
+}
+
+// Module level so react-query can keep the combined result stable between renders.
+function loadedAssets(
+  results: { data?: Awaited<ReturnType<typeof apiRequest<AssetGetResponse>>> }[]
+) {
+  return results.flatMap((q) => (q.data?.success ? [q.data.data] : []));
+}
+
+/** The assets that have loaded so far, in the order of `assetIds`. */
+export function useAssetQueries(appId: string, assetIds: string[]) {
+  return useQueries({
+    queries: assetIds.map((assetId) => assetQueryOptions(appId, assetId)),
+    combine: loadedAssets,
   });
 }
 
@@ -251,12 +347,40 @@ export function useAppStateStatusQuery(appId?: string) {
   });
 }
 
+// Polls until every step is done, so steps tick as the user does them.
+export function useAppSetupQuery(appId: string) {
+  return useQuery({
+    queryKey: ["apps", appId, "setup"],
+    queryFn: () => apiRequest<AppSetupGetResponse>(`/v1/apps/${appId}/setup`),
+    enabled: !!appId,
+    refetchInterval: (query) => {
+      const setup = query.state.data?.success ? query.state.data.data : null;
+      const done = setup?.invited && setup.has_command && setup.ran_command;
+      return done ? false : 5000;
+    },
+  });
+}
+
 export function useAppStateGuildsQuery(appId: string) {
   return useQuery({
     queryKey: ["apps", appId, "state", "guilds"],
     queryFn: () =>
       apiRequest<StateGuildListResponse>(`/v1/apps/${appId}/state/guilds`),
     enabled: !!appId,
+  });
+}
+
+export function useAppStateGuildRolesQuery(
+  appId: string,
+  guildId: string | null
+) {
+  return useQuery({
+    queryKey: ["apps", appId, "state", "guilds", guildId, "roles"],
+    queryFn: () =>
+      apiRequest<StateGuildRoleListResponse>(
+        `/v1/apps/${appId}/state/guilds/${guildId}/roles`
+      ),
+    enabled: !!appId && !!guildId,
   });
 }
 
@@ -300,6 +424,22 @@ export function useBillingPlansQuery() {
   return useQuery({
     queryKey: ["billing", "plans"],
     queryFn: () => apiRequest<BillingPlanListResponse>(`/v1/billing/plans`),
+  });
+}
+
+export const flowAIUsageQueryKey = (appId: string) => [
+  "apps",
+  appId,
+  "flow-ai",
+  "usage",
+];
+
+export function useFlowAIUsageQuery(appId: string) {
+  return useQuery({
+    queryKey: flowAIUsageQueryKey(appId),
+    queryFn: () =>
+      apiRequest<FlowAIUsageGetResponse>(`/v1/apps/${appId}/flow-ai/usage`),
+    enabled: !!appId,
   });
 }
 

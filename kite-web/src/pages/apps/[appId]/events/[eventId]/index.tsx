@@ -1,19 +1,16 @@
 import FlowPage from "@/components/flow/FlowPage";
 import { useEventListenerUpdateMutation } from "@/lib/api/mutations";
 import { FlowData } from "@/lib/flow/dataSchema";
-import { useEventListener, useResponseData } from "@/lib/hooks/api";
+import { useEventListener, useFlowLogEntries } from "@/lib/hooks/api";
 import { useAppId, useEventId } from "@/lib/hooks/params";
-import { useBeforePageExit } from "@/lib/hooks/exit";
+import { useUnsavedChangesWarning } from "@/lib/hooks/exit";
 import Head from "next/head";
 import { useRouter } from "next/router";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { LogEntryListDrawer } from "@/components/app/LogEntryListDrawer";
-import { useLogEntriesQuery } from "@/lib/api/queries";
 
 export default function AppEventListenerPage() {
-  const ignoreChange = useRef(false);
-
   const router = useRouter();
   const listener = useEventListener((res) => {
     if (!res.success) {
@@ -26,12 +23,6 @@ export default function AppEventListenerPage() {
           query: { appId: router.query.appId },
         });
       }
-    } else {
-      // This is a workaround to ignore the initial change event
-      ignoreChange.current = true;
-      setTimeout(() => {
-        ignoreChange.current = false;
-      }, 100);
     }
   });
 
@@ -45,19 +36,16 @@ export default function AppEventListenerPage() {
   const [logsOpen, setLogsOpen] = useState(false);
 
   const onChange = useCallback(() => {
-    if (!ignoreChange.current) {
-      setHasUnsavedChanges(true);
-    }
-  }, [setHasUnsavedChanges, ignoreChange]);
+    setHasUnsavedChanges(true);
+  }, [setHasUnsavedChanges]);
 
   const save = useCallback(
-    (data: FlowData) => {
+    (data: FlowData, options?: { onSuccess?: () => void }) => {
       setIsSaving(true);
 
       updateMutation.mutate(
         {
           flow_source: data,
-          enabled: true,
         },
         {
           onSuccess(res) {
@@ -65,6 +53,7 @@ export default function AppEventListenerPage() {
               toast.success(
                 "Event listener saved! It may take up to a minute for all changes to take effect."
               );
+              options?.onSuccess?.();
             } else {
               toast.error(
                 `Failed to update event listener: ${res.error.message} (${res.error.code})`
@@ -81,37 +70,16 @@ export default function AppEventListenerPage() {
     [setIsSaving, setHasUnsavedChanges, updateMutation]
   );
 
-  const exit = useCallback(() => {
-    if (hasUnsavedChanges) {
-      if (
-        !confirm("You have unsaved changes. Are you sure you want to exit?")
-      ) {
-        return;
-      }
-    }
+  const leave = useUnsavedChangesWarning(hasUnsavedChanges);
 
-    router.push({
+  const exit = useCallback(() => {
+    leave({
       pathname: "/apps/[appId]/events",
       query: { appId: router.query.appId },
     });
-  }, [hasUnsavedChanges, router]);
+  }, [leave, router]);
 
-  useBeforePageExit(
-    (e) => {
-      if (hasUnsavedChanges) {
-        e.preventDefault();
-        return "You have unsaved changes. Are you sure you want to exit?";
-      }
-    },
-    [hasUnsavedChanges]
-  );
-
-  const logsQuery = useLogEntriesQuery(useAppId(), {
-    limit: 10,
-    eventId: useEventId(),
-    refetchInterval: 10000,
-  });
-  const logs = useResponseData(logsQuery);
+  const logs = useFlowLogEntries({ eventId: useEventId() });
 
   return (
     <div className="flex min-h-[100dvh] w-full flex-col">
@@ -121,7 +89,13 @@ export default function AppEventListenerPage() {
       {listener && (
         <FlowPage
           flowData={listener.flow_source}
-          context="event_discord"
+          context={
+            listener.source === "schedule"
+              ? "event_schedule"
+              : listener.source === "webhook"
+              ? "event_webhook"
+              : "event_discord"
+          }
           hasUnsavedChanges={hasUnsavedChanges}
           onChange={onChange}
           isSaving={isSaving}

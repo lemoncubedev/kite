@@ -1,169 +1,37 @@
+import {
+  isNodeTypeAvailable,
+  NodeCategory,
+  nodeCategories,
+} from "@/lib/flow/categories";
 import { useFlowContext } from "@/lib/flow/context";
 import { NodeValues, createNode, getNodeValues } from "@/lib/flow/nodes";
 import { useReactFlow, useStore } from "@xyflow/react";
-import { SearchIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, SearchIcon } from "lucide-react";
 import { DragEvent, useMemo, useState } from "react";
 import DynamicIcon from "../icons/DynamicIcon";
+import Link from "next/link";
+import { useAppId } from "@/lib/hooks/params";
+import { useMissingIntegrations } from "@/lib/integrations/hooks";
 import { Input } from "../ui/input";
 import { ScrollArea } from "../ui/scroll-area";
-
-const nodeCategories = {
-  option: [
-    {
-      title: "Commands",
-      nodeTypes: [
-        "option_command_argument",
-        "option_command_permissions",
-        "option_command_contexts",
-      ],
-      contextTypes: ["command"],
-    },
-    {
-      title: "Events",
-      nodeTypes: ["option_event_filter"],
-      contextTypes: ["event_discord"],
-    },
-    /* {
-      title: "Events",
-      nodeTypes: ["option_event_filter"],
-    }, */
-  ],
-  action: [
-    {
-      title: "Responses",
-      nodeTypes: [
-        "action_response_create",
-        "action_response_edit",
-        "action_response_delete",
-        "action_response_defer",
-        "suspend_response_modal",
-      ],
-      contextTypes: ["command", "component_button"],
-    },
-    {
-      title: "Messages",
-      nodeTypes: [
-        "action_message_create",
-        "action_message_edit",
-        "action_message_delete",
-        "action_message_get",
-        "action_private_message_create",
-        "action_message_reaction_create",
-        "action_message_reaction_delete",
-      ],
-      contextTypes: null,
-    },
-    {
-      title: "Members",
-      nodeTypes: [
-        "action_member_ban",
-        "action_member_unban",
-        "action_member_kick",
-        "action_member_timeout",
-        "action_member_edit",
-        "action_member_get",
-      ],
-      contextTypes: null,
-    },
-    {
-      title: "Users",
-      nodeTypes: ["action_user_get"],
-      contextTypes: null,
-    },
-    {
-      title: "Roles",
-      nodeTypes: [
-        "action_member_role_add",
-        "action_member_role_remove",
-        "action_role_get",
-      ],
-      contextTypes: null,
-    },
-
-    {
-      title: "Servers",
-      nodeTypes: ["action_guild_get"],
-      contextTypes: null,
-    },
-    {
-      title: "Channels",
-      nodeTypes: [
-        "action_channel_create",
-        "action_channel_edit",
-        "action_channel_delete",
-        "action_channel_get",
-        "action_thread_create",
-        "action_thread_member_add",
-        "action_thread_member_remove",
-      ],
-      contextTypes: null,
-    },
-    {
-      title: "Stored Variables",
-      nodeTypes: [
-        "action_variable_set",
-        "action_variable_delete",
-        "action_variable_get",
-      ],
-      contextTypes: null,
-    },
-    {
-      title: "Roblox",
-      nodeTypes: ["action_roblox_user_get"],
-      contextTypes: null,
-    },
-    {
-      title: "Other Actions",
-      nodeTypes: [
-        "action_expression_evaluate",
-        "action_ai_chat_completion",
-        "action_ai_web_search",
-        "action_http_request",
-        "action_random_generate",
-        "action_log",
-      ],
-      contextTypes: null,
-    },
-  ],
-  control_flow: [
-    {
-      title: "Conditions",
-      nodeTypes: [
-        "control_condition_compare",
-        "control_condition_user",
-        "control_condition_channel",
-        "control_condition_role",
-      ],
-      contextTypes: null,
-    },
-    {
-      title: "Loops",
-      nodeTypes: ["control_loop", "control_loop_exit"],
-      contextTypes: null,
-    },
-    {
-      title: "Errors",
-      nodeTypes: ["control_error_handler"],
-      contextTypes: null,
-    },
-    {
-      title: "Others",
-      nodeTypes: ["control_sleep"],
-      contextTypes: null,
-    },
-  ],
-};
-
-type NodeCategory = keyof typeof nodeCategories;
+import { cn } from "@/lib/utils";
 
 export default function FlowNodeExplorer({
   category,
+  onNodeSelect,
+  hideHeader,
 }: {
   category: NodeCategory;
+  onNodeSelect?: () => void;
+  hideHeader?: boolean;
 }) {
   const contextType = useFlowContext((c) => c.type);
 
   const [search, setSearch] = useState("");
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+
+  const toggleCollapsed = (title: string) =>
+    setCollapsed((c) => ({ ...c, [title]: !c[title] }));
 
   const sections = useMemo(() => {
     return nodeCategories[category].map((s) => ({
@@ -185,35 +53,38 @@ export default function FlowNodeExplorer({
         ...s,
         nodes: s.nodes.filter(
           (n) =>
-            n.values.defaultTitle.toLowerCase().includes(normalizedSearch) ||
-            n.values.defaultDescription.toLowerCase().includes(normalizedSearch)
+            isNodeTypeAvailable(n.type, contextType) &&
+            (n.values.defaultTitle.toLowerCase().includes(normalizedSearch) ||
+              n.values.defaultDescription
+                .toLowerCase()
+                .includes(normalizedSearch))
         ),
       }))
-      .filter(
-        (s) =>
-          s.nodes.length > 0 &&
-          (!s.contextTypes || s.contextTypes.includes(contextType))
-      );
+      .filter((s) => s.nodes.length > 0);
   }, [sections, contextType, search]);
 
   return (
-    <div className="w-full h-full flex flex-col">
-      <div className="p-5 flex-none">
-        <div className="text-xl font-bold text-foreground mb-2">
-          {category === "action"
-            ? "Action"
-            : category === "control_flow"
-            ? "Control Flow"
-            : "Option"}{" "}
-          Blocks
-        </div>
-        <div className="text-muted-foreground mb-5">
-          {category === "action"
-            ? "With Action Blocks you can perform actions with your app."
-            : category === "control_flow"
-            ? "With Control Flow Blocks you define how your app behaves."
-            : "With Option Blocks you add option to other blocks."}
-        </div>
+    <div className="w-full h-full flex flex-col min-h-0 overflow-hidden">
+      <div className={cn("flex-none", hideHeader ? "p-3 pb-2" : "p-5")}>
+        {!hideHeader && (
+          <>
+            <div className="text-xl font-bold text-foreground mb-2">
+              {category === "action"
+                ? "Action"
+                : category === "control_flow"
+                ? "Control Flow"
+                : "Option"}{" "}
+              Blocks
+            </div>
+            <div className="text-muted-foreground mb-5">
+              {category === "action"
+                ? "With Action Blocks you can perform actions with your app."
+                : category === "control_flow"
+                ? "With Control Flow Blocks you define how your app behaves."
+                : "With Option Blocks you add option to other blocks."}
+            </div>
+          </>
+        )}
         <div className="relative">
           <Input
             placeholder="Search ..."
@@ -224,31 +95,59 @@ export default function FlowNodeExplorer({
           <SearchIcon className="absolute size-5 left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
         </div>
       </div>
-      <ScrollArea className="flex-auto mr-1">
+      <ScrollArea className="flex-1 min-h-0 mr-1">
         <div className="space-y-3 pl-3 pr-1 pb-5">
-          {filteredSections.map((section, i) => (
-            <div key={i}>
-              <div className="text-foreground font-medium mb-2 px-2">
-                {section.title}
+          {filteredSections.map((section, i) => {
+            const isCollapsed = !search.trim() && collapsed[section.title];
+            return (
+              <div key={i}>
+                <button
+                  type="button"
+                  onClick={() => toggleCollapsed(section.title)}
+                  className="w-full flex items-center gap-1 text-foreground font-medium mb-2 px-2 hover:text-foreground/80"
+                >
+                  {isCollapsed ? (
+                    <ChevronRightIcon className="h-4 w-4 flex-none" />
+                  ) : (
+                    <ChevronDownIcon className="h-4 w-4 flex-none" />
+                  )}
+                  <span>{section.title}</span>
+                  <span className="ml-auto text-muted-foreground text-sm font-normal">
+                    {section.nodes.length}
+                  </span>
+                </button>
+                {!isCollapsed && (
+                  <div className="space-y-2">
+                    {section.nodes.map((node) => (
+                      <AvailableNode
+                        key={node.type}
+                        type={node.type}
+                        values={node.values}
+                        onSelect={onNodeSelect}
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
-              <div className="space-y-2">
-                {section.nodes.map((node) => (
-                  <AvailableNode
-                    key={node.type}
-                    type={node.type}
-                    values={node.values}
-                  />
-                ))}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </ScrollArea>
     </div>
   );
 }
 
-function AvailableNode({ type, values }: { type: string; values: NodeValues }) {
+function AvailableNode({
+  type,
+  values,
+  onSelect,
+}: {
+  type: string;
+  values: NodeValues;
+  onSelect?: () => void;
+}) {
+  const appId = useAppId();
+  const missingIntegrations = useMissingIntegrations(type);
   const { addNodes, addEdges, getViewport } = useReactFlow();
   // The canvas is not the window: it sits right of the w-96 block explorer,
   // inside a dialog. Ask react-flow for its own pane size rather than reading
@@ -278,6 +177,7 @@ function AvailableNode({ type, values }: { type: string; values: NodeValues }) {
     });
     addNodes(nodes);
     addEdges(edges);
+    onSelect?.();
   }
 
   return (
@@ -285,7 +185,7 @@ function AvailableNode({ type, values }: { type: string; values: NodeValues }) {
       className="p-2 hover:bg-muted rounded-md relative select-none cursor-grab"
       onDragStart={onStartDrag}
       onClick={onClick}
-      draggable
+      draggable={!onSelect}
     >
       <div className="flex items-start space-x-3">
         <div
@@ -298,8 +198,29 @@ function AvailableNode({ type, values }: { type: string; values: NodeValues }) {
           />
         </div>
         <div className="overflow-hidden">
-          <div className="font-medium text-foreground leading-5 mb-1 truncate">
-            {values.defaultTitle}
+          <div className="flex items-center gap-2 mb-1">
+            <div className="font-medium text-foreground leading-5 truncate">
+              {values.defaultTitle}
+            </div>
+            {values.premiumFeature && (
+              <div className="bg-primary/15 text-primary rounded px-1.5 text-xs font-medium flex-none">
+                Premium
+              </div>
+            )}
+            {missingIntegrations.map((integration) => (
+              <Link
+                key={integration.id}
+                href={{
+                  pathname: "/apps/[appId]/integrations",
+                  query: { appId },
+                }}
+                target="_blank"
+                onClick={(e) => e.stopPropagation()}
+                className="bg-amber-500/15 text-amber-600 dark:text-amber-400 rounded px-1.5 text-xs font-medium flex-none hover:underline"
+              >
+                Enable {integration.name}
+              </Link>
+            ))}
           </div>
           <div className="text-sm text-muted-foreground">
             {values.defaultDescription}

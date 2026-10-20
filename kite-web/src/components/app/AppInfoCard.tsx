@@ -6,8 +6,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useAppStateStatusQuery, useUserQuery } from "@/lib/api/queries";
-import { useApp, useResponseData, useUsageCredits } from "@/lib/hooks/api";
-import { formatDate } from "@/lib/utils";
+import {
+  useApp,
+  useAppPlan,
+  useResponseData,
+  useUsageCredits,
+} from "@/lib/hooks/api";
+import { formatDate, formatNumber } from "@/lib/utils";
 import { CopyIcon } from "lucide-react";
 import { useCallback } from "react";
 import { Badge } from "../ui/badge";
@@ -17,6 +22,7 @@ import AppInviteButton from "./AppInviteButton";
 
 export default function AppInfoCard() {
   const app = useApp();
+  const plan = useAppPlan();
 
   const ownerUser = useResponseData(useUserQuery(app?.owner_user_id));
 
@@ -39,7 +45,7 @@ export default function AppInfoCard() {
             <Button
               size="icon"
               variant="outline"
-              className="h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100"
+              className="h-6 w-6 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:hover)]:opacity-0"
               onClick={copyAppId}
             >
               <CopyIcon className="h-3 w-3" />
@@ -83,16 +89,34 @@ export default function AppInfoCard() {
                   : "Offline"}
               </span>
             </li>
+            <li
+              className="flex items-center justify-between"
+              title="Approximate count from Discord, updated daily"
+            >
+              <span className="text-muted-foreground">Servers</span>
+              <span>{formatInstallCount(app?.discord_guild_count)}</span>
+            </li>
+            <li
+              className="flex items-center justify-between"
+              title="Approximate count from Discord, updated daily"
+            >
+              <span className="text-muted-foreground">User Installs</span>
+              <span>{formatInstallCount(app?.discord_user_install_count)}</span>
+            </li>
           </ul>
         </div>
         <Separator className="my-4" />
         <div className="grid gap-3">
           <div className="font-semibold">Subscription Plan</div>
           <div>
-            <Badge className="px-3 py-1">Open Beta</Badge>
+            <Badge className="px-3 py-1">{plan?.title ?? "-"}</Badge>
           </div>
         </div>
       </CardContent>
     </Card>
   );
+}
+
+function formatInstallCount(count: number | null | undefined) {
+  return count == null ? "-" : formatNumber(count);
 }

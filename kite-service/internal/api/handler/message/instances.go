@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/diamondburned/arikawa/v3/api"
 	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/kitecloud/kite/kite-service/internal/api/handler"
 	"github.com/kitecloud/kite/kite-service/internal/api/wire"
@@ -13,8 +14,18 @@ import (
 	"github.com/kitecloud/kite/kite-service/pkg/message"
 )
 
+// maxFlowInstances caps how many flow-sent instances are listed, since flows
+// can send a template many times. The web dashboard mirrors it.
+const maxFlowInstances = 100
+
 func (h *MessageHandler) HandleMessageInstanceList(c *handler.Context) (*wire.MessageInstanceListResponse, error) {
-	instances, err := h.messageInstanceStore.MessageInstancesByMessage(c.Context(), c.Message.ID, false)
+	var instances []*model.MessageInstance
+	var err error
+	if c.Query("sent_by") == "flow" {
+		instances, err = h.messageInstanceStore.FlowMessageInstancesByMessage(c.Context(), c.App.ID, c.Message.ID, maxFlowInstances)
+	} else {
+		instances, err = h.messageInstanceStore.MessageInstancesByMessage(c.Context(), c.App.ID, c.Message.ID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get message instances: %w", err)
 	}
@@ -41,16 +52,42 @@ func (h *MessageHandler) HandleMessageInstanceCreate(c *handler.Context, req wir
 		return nil, fmt.Errorf("failed to get attachments: %w", err)
 	}
 
-	msg, err := client.SendMessageComplex(discord.ChannelID(channelID), data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send message: %w", err)
+	// The channel the message ends up in, which is the new thread for forum posts.
+	instanceChannelID := req.DiscordChannelID
+	var messageID discord.MessageID
+
+	if req.ThreadName != "" {
+		tagIDs := make([]discord.TagID, 0, len(req.AppliedTags))
+		for _, tag := range req.AppliedTags {
+			id, _ := strconv.ParseUint(tag, 10, 64)
+			tagIDs = append(tagIDs, discord.TagID(id))
+		}
+
+		thread, err := client.StartThreadInForum(discord.ChannelID(channelID), api.StartForumThreadData{
+			Name:        req.ThreadName,
+			AppliedTags: tagIDs,
+			Message:     data,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create forum post: %w", err)
+		}
+
+		// The first message of a forum post has the same ID as the post.
+		instanceChannelID = thread.ID.String()
+		messageID = discord.MessageID(thread.ID)
+	} else {
+		msg, err := client.SendMessageComplex(discord.ChannelID(channelID), data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to send message: %w", err)
+		}
+		messageID = msg.ID
 	}
 
-	instance, err := h.messageInstanceStore.CreateMessageInstance(c.Context(), &model.MessageInstance{
+	instance, err := h.messageInstanceStore.CreateMessageInstance(c.Context(), c.App.ID, &model.MessageInstance{
 		MessageID:        c.Message.ID,
 		DiscordGuildID:   req.DiscordGuildID,
-		DiscordChannelID: req.DiscordChannelID,
-		DiscordMessageID: msg.ID.String(),
+		DiscordChannelID: instanceChannelID,
+		DiscordMessageID: messageID.String(),
 		FlowSources:      c.Message.FlowSources,
 		CreatedAt:        time.Now().UTC(),
 		UpdatedAt:        time.Now().UTC(),
@@ -65,12 +102,16 @@ func (h *MessageHandler) HandleMessageInstanceCreate(c *handler.Context, req wir
 func (h *MessageHandler) HandleMessageInstanceUpdate(c *handler.Context) (*wire.MessageInstanceUpdateResponse, error) {
 	instanceID, _ := strconv.ParseUint(c.Param("instanceID"), 10, 64)
 
-	instance, err := h.messageInstanceStore.MessageInstance(c.Context(), c.Message.ID, instanceID)
+	instance, err := h.messageInstanceStore.MessageInstance(c.Context(), c.App.ID, c.Message.ID, instanceID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			return nil, handler.ErrNotFound("message_instance_not_found", "message instance not found")
 		}
 		return nil, fmt.Errorf("failed to get message instance: %w", err)
+	}
+
+	if instance.Ephemeral {
+		return nil, handler.ErrBadRequest("message_instance_ephemeral", "ephemeral messages can't be updated")
 	}
 
 	client, err := h.appStateManager.AppClient(c.Context(), c.App.ID)
@@ -81,7 +122,9 @@ func (h *MessageHandler) HandleMessageInstanceUpdate(c *handler.Context) (*wire.
 	channelID, _ := strconv.ParseUint(instance.DiscordChannelID, 10, 64)
 	messageID, _ := strconv.ParseUint(instance.DiscordMessageID, 10, 64)
 
-	data := c.Message.Data.ToEditMessageData(message.ConvertOptions{})
+	data := c.Message.Data.ToEditMessageData(message.ConvertOptions{
+		SentAt: discord.MessageID(messageID).Time(),
+	})
 	data.Attachments = &[]discord.Attachment{}
 	data.Files, err = h.attachmentsToFiles(c.Context(), c.Message.Data.Attachments)
 	if err != nil {
@@ -93,7 +136,7 @@ func (h *MessageHandler) HandleMessageInstanceUpdate(c *handler.Context) (*wire.
 		return nil, fmt.Errorf("failed to edit message: %w", err)
 	}
 
-	instance, err = h.messageInstanceStore.UpdateMessageInstance(c.Context(), &model.MessageInstance{
+	instance, err = h.messageInstanceStore.UpdateMessageInstance(c.Context(), c.App.ID, &model.MessageInstance{
 		ID:          instance.ID,
 		MessageID:   instance.MessageID,
 		FlowSources: c.Message.FlowSources,
@@ -109,7 +152,7 @@ func (h *MessageHandler) HandleMessageInstanceUpdate(c *handler.Context) (*wire.
 func (h *MessageHandler) HandleMessageInstanceDelete(c *handler.Context) (*wire.MessageInstanceDeleteResponse, error) {
 	instanceID, _ := strconv.ParseUint(c.Param("instanceID"), 10, 64)
 
-	err := h.messageInstanceStore.DeleteMessageInstance(c.Context(), c.Message.ID, instanceID)
+	err := h.messageInstanceStore.DeleteMessageInstance(c.Context(), c.App.ID, c.Message.ID, instanceID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			return nil, handler.ErrNotFound("message_instance_not_found", "message instance not found")

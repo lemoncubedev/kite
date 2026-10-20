@@ -9,6 +9,9 @@ import (
 
 type VariableStore interface {
 	VariablesByApp(ctx context.Context, appID string) ([]*model.Variable, error)
+	// VariablesByAppWithoutTotals is VariablesByApp without counting the
+	// values of each variable, which is slow for variables with many.
+	VariablesByAppWithoutTotals(ctx context.Context, appID string) ([]*model.Variable, error)
 	CountVariablesByApp(ctx context.Context, appID string) (int, error)
 	Variable(ctx context.Context, id string) (*model.Variable, error)
 	VariableByName(ctx context.Context, appID, name string) (*model.Variable, error)
@@ -18,10 +21,13 @@ type VariableStore interface {
 }
 
 type VariableValueStore interface {
-	VariableValues(ctx context.Context, variableID string) ([]*model.VariableValue, error)
-	VariableValue(ctx context.Context, variableID string, scope null.String) (*model.VariableValue, error)
-	SetVariableValue(ctx context.Context, value model.VariableValue) error
-	UpdateVariableValue(ctx context.Context, operation model.VariableValueOperation, value model.VariableValue) (*model.VariableValue, error)
-	DeleteVariableValue(ctx context.Context, variableID string, scope null.String) error
-	DeleteAllVariableValues(ctx context.Context, variableID string) error
+	VariableValues(ctx context.Context, appID string, variableID string) ([]*model.VariableValue, error)
+	// SearchVariableValues returns a page of the variable's values whose scope
+	// contains search, most recently updated first, and how many match in total.
+	SearchVariableValues(ctx context.Context, appID string, variableID string, search string, limit int, offset int) ([]*model.VariableValue, int, error)
+	VariableValue(ctx context.Context, appID string, variableID string, scope null.String) (*model.VariableValue, error)
+	SetVariableValue(ctx context.Context, appID string, value model.VariableValue) error
+	UpdateVariableValue(ctx context.Context, appID string, operation model.VariableValueOperation, value model.VariableValue) (*model.VariableValue, error)
+	DeleteVariableValue(ctx context.Context, appID string, variableID string, scope null.String) error
+	DeleteAllVariableValues(ctx context.Context, appID string, variableID string) error
 }

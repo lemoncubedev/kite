@@ -8,21 +8,28 @@ import (
 	"github.com/kitecloud/kite/kite-service/internal/api/access"
 	"github.com/kitecloud/kite/kite-service/internal/api/handler"
 	"github.com/kitecloud/kite/kite-service/internal/api/handler/app"
+	appsetup "github.com/kitecloud/kite/kite-service/internal/api/handler/app_setup"
 	appstate "github.com/kitecloud/kite/kite-service/internal/api/handler/app_state"
+	"github.com/kitecloud/kite/kite-service/internal/api/handler/appsecret"
 	"github.com/kitecloud/kite/kite-service/internal/api/handler/asset"
 	"github.com/kitecloud/kite/kite-service/internal/api/handler/auth"
 	"github.com/kitecloud/kite/kite-service/internal/api/handler/billing"
 	commandhandler "github.com/kitecloud/kite/kite-service/internal/api/handler/command"
 	eventlistener "github.com/kitecloud/kite/kite-service/internal/api/handler/event_listener"
+	flowaihandler "github.com/kitecloud/kite/kite-service/internal/api/handler/flowai"
+	"github.com/kitecloud/kite/kite-service/internal/api/handler/integration"
 	"github.com/kitecloud/kite/kite-service/internal/api/handler/logs"
 	"github.com/kitecloud/kite/kite-service/internal/api/handler/message"
 	pluginhandler "github.com/kitecloud/kite/kite-service/internal/api/handler/plugin"
+	"github.com/kitecloud/kite/kite-service/internal/api/handler/sharecode"
+	"github.com/kitecloud/kite/kite-service/internal/api/handler/stats"
 	"github.com/kitecloud/kite/kite-service/internal/api/handler/usage"
 	"github.com/kitecloud/kite/kite-service/internal/api/handler/user"
 	"github.com/kitecloud/kite/kite-service/internal/api/handler/variable"
 	"github.com/kitecloud/kite/kite-service/internal/api/session"
 	corebilling "github.com/kitecloud/kite/kite-service/internal/core/billing"
 	"github.com/kitecloud/kite/kite-service/internal/core/command"
+	"github.com/kitecloud/kite/kite-service/internal/core/flowai"
 	"github.com/kitecloud/kite/kite-service/internal/core/plan"
 	"github.com/kitecloud/kite/kite-service/internal/store"
 	"github.com/kitecloud/kite/kite-service/internal/util"
@@ -33,6 +40,7 @@ import (
 func (s *APIServer) RegisterRoutes(
 	userStore store.UserStore,
 	sessionStore store.SessionStore,
+	shareCodeStore store.ShareCodeStore,
 	appStore store.AppStore,
 	logStore store.LogStore,
 	usageStore store.UsageStore,
@@ -47,10 +55,16 @@ func (s *APIServer) RegisterRoutes(
 	entitlementStore store.EntitlementStore,
 	assetStore store.AssetStore,
 	appStateManager store.AppStateManager,
+	webhookRunner eventlistener.WebhookRunner,
 	planManager *plan.PlanManager,
 	pluginRegistry *plugin.Registry,
 	tokenCrypt *util.SymmetricCrypt,
 	commandManager *command.CommandManager,
+	assistantPromptStore store.AssistantPromptStore,
+	flowAssistant *flowai.Assistant,
+	appSecretStore store.AppSecretStore,
+	appIntegrationStore store.AppIntegrationStore,
+	statsStore store.StatsStore,
 ) {
 	sessionManager := session.NewSessionManager(session.SessionManagerConfig{
 		StrictCookies: s.config.StrictCookies,
@@ -92,6 +106,10 @@ func (s *APIServer) RegisterRoutes(
 		return c.Send(http.StatusOK, []byte("OK"))
 	})
 
+	// Public totals for the website
+	statsHandler := stats.NewStatsHandler(statsStore)
+	v1Group.Get("/stats", handler.Typed(statsHandler.HandleStatsGet))
+
 	// Auth routes
 	authHandler := auth.NewAuthHandler(auth.AuthHandlerConfig{
 		SecureCookies:       s.config.SecureCookies,
@@ -111,6 +129,17 @@ func (s *APIServer) RegisterRoutes(
 
 	usersGroup := v1Group.Group("/users", sessionManager.RequireSession)
 	usersGroup.Get("/{userID}", handler.Typed(userHandler.HandlerUserGet))
+
+	// Share code routes
+	shareCodeHandler := sharecode.NewShareCodeHandler(shareCodeStore)
+
+	// Not under an app because codes are usually imported into a different app.
+	shareCodesGroup := v1Group.Group("/share-codes", sessionManager.RequireSession)
+	// Low so codes can't be enumerated, importing is a rare manual action.
+	shareCodesGroup.Get("/{code}",
+		handler.Typed(shareCodeHandler.HandleShareCodeGet),
+		handler.RateLimitByUser(10, time.Minute),
+	)
 
 	// App routes
 	appHandler := app.NewAppHandler(
@@ -147,6 +176,10 @@ func (s *APIServer) RegisterRoutes(
 	appGroup.Get("/collaborators", handler.Typed(appHandler.HandleAppCollaboratorsList))
 	appGroup.Post("/collaborators", handler.TypedWithBody(appHandler.HandleAppCollaboratorCreate))
 	appGroup.Delete("/collaborators/{userID}", handler.Typed(appHandler.HandleAppCollaboratorDelete))
+	appGroup.Post("/share-codes",
+		handler.TypedWithBody(shareCodeHandler.HandleShareCodeCreate),
+		handler.RateLimitByUser(10, time.Minute),
+	)
 
 	// Billing routes
 	lemonSqueezyClient := corebilling.NewLemonSqueezyClient(
@@ -158,9 +191,10 @@ func (s *APIServer) RegisterRoutes(
 	)
 
 	billingHandler := billing.NewBillingHandler(billing.BillingHandlerConfig{
-		LemonSqueezyStoreID: s.config.Billing.LemonSqueezyStoreID,
-		TestMode:            s.config.Billing.TestMode,
-		AppPublicBaseURL:    s.config.AppPublicBaseURL,
+		LemonSqueezyStoreID:       s.config.Billing.LemonSqueezyStoreID,
+		LemonSqueezySigningSecret: s.config.Billing.LemonSqueezySigningSecret,
+		TestMode:                  s.config.Billing.TestMode,
+		AppPublicBaseURL:          s.config.AppPublicBaseURL,
 	}, userStore, subscriptionStore, planManager, subscriptionManager, lemonSqueezyClient)
 
 	v1Group.Post("/billing/webhook", handler.TypedWithBody(billingHandler.HandleBillingWebhook))
@@ -181,6 +215,18 @@ func (s *APIServer) RegisterRoutes(
 	logsGroup := appGroup.Group("/logs", accessManager.AppAccess)
 	logsGroup.Get("/", handler.Typed(logHandler.HandleLogEntryList))
 	logsGroup.Get("/summary", handler.Typed(logHandler.HandleLogSummaryGet))
+
+	// Flow AI routes
+	flowAIHandler := flowaihandler.NewFlowAIHandler(assistantPromptStore, variableStore, appSecretStore, appIntegrationStore, flowAssistant, s.config.AssistantMaxRepairs)
+
+	flowAIGroup := appGroup.Group("/flow-ai")
+	flowAIGroup.Get("/usage", handler.Typed(flowAIHandler.HandleFlowAIUsageGet))
+	flowAIGroup.Post("/chat",
+		handler.TypedWithBody(flowAIHandler.HandleFlowAIChat),
+		// Repairs are sent right after a prompt, so a few prompts in a row
+		// take many requests. The monthly limits cap the cost.
+		handler.RateLimitByUser(30, time.Minute),
+	)
 
 	// Usage routes
 	usageHandler := usage.NewUsageHandler(usageStore)
@@ -209,7 +255,7 @@ func (s *APIServer) RegisterRoutes(
 	)
 
 	// Event listener routes
-	eventListenerHandler := eventlistener.NewEventListenerHandler(eventListenerStore)
+	eventListenerHandler := eventlistener.NewEventListenerHandler(eventListenerStore, webhookRunner)
 
 	eventListenersGroup := appGroup.Group("/event-listeners")
 	eventListenersGroup.Get("/", handler.Typed(eventListenerHandler.HandleEventListenerList))
@@ -221,6 +267,15 @@ func (s *APIServer) RegisterRoutes(
 	eventListenerGroup.Patch("/", handler.TypedWithBody(eventListenerHandler.HandleEventListenerUpdate))
 	eventListenerGroup.Delete("/", handler.Typed(eventListenerHandler.HandleEventListenerDelete))
 	eventListenerGroup.Put("/enabled", handler.TypedWithBody(eventListenerHandler.HandleEventListenerUpdateEnabled))
+	eventListenerGroup.Post("/webhook-secret",
+		handler.Typed(eventListenerHandler.HandleEventListenerWebhookSecretRegenerate),
+		handler.RateLimitByUser(10, time.Minute),
+	)
+
+	// Public, and not in the apps group because the sender has no session.
+	// nginx routes the request to the cluster that runs the app by the app ID
+	// that follows /webhooks/, like it does for routes of that group.
+	v1Group.Post("/webhooks/{appID}/{listenerID}/{secret}", eventListenerHandler.HandleEventListenerWebhook)
 
 	// Plugin instance routes
 	pluginHandler := pluginhandler.NewPluginHandler(pluginRegistry, pluginInstanceStore)
@@ -250,6 +305,38 @@ func (s *APIServer) RegisterRoutes(
 	variableGroup.Get("/", handler.Typed(variablesHandler.HandleVariableGet))
 	variableGroup.Patch("/", handler.TypedWithBody(variablesHandler.HandleVariableUpdate))
 	variableGroup.Delete("/", handler.Typed(variablesHandler.HandleVariableDelete))
+
+	variableValuesGroup := variableGroup.Group("/values")
+	variableValuesGroup.Get("/", handler.Typed(variablesHandler.HandleVariableValueList))
+	variableValuesGroup.Put("/", handler.TypedWithBody(variablesHandler.HandleVariableValueSet))
+	variableValuesGroup.Delete("/", handler.Typed(variablesHandler.HandleVariableValueDelete))
+
+	// Secret routes
+	appSecretHandler := appsecret.NewAppSecretHandler(appSecretStore, tokenCrypt)
+
+	secretsGroup := appGroup.Group("/secrets")
+	secretsGroup.Get("/", handler.Typed(appSecretHandler.HandleAppSecretList))
+	secretsGroup.Post("/", handler.TypedWithBody(appSecretHandler.HandleAppSecretCreate))
+
+	secretGroup := secretsGroup.Group("/{secretID}")
+	secretGroup.Patch("/", handler.TypedWithBody(appSecretHandler.HandleAppSecretUpdate))
+	secretGroup.Delete("/", handler.Typed(appSecretHandler.HandleAppSecretDelete))
+
+	// Integration routes
+	integrationHandler := integration.NewIntegrationHandler(appSecretStore, appIntegrationStore, tokenCrypt)
+
+	integrationsGroup := appGroup.Group("/integrations")
+	integrationsGroup.Get("/", handler.Typed(integrationHandler.HandleAppIntegrationList))
+
+	integrationGroup := integrationsGroup.Group("/{integrationID}")
+	integrationGroup.Patch("/", handler.TypedWithBody(integrationHandler.HandleAppIntegrationUpdate))
+	// Low as each one checks the credential at the service, which can block
+	// Kite for every app after too many invalid ones, like ER:LC.
+	integrationGroup.Put("/",
+		handler.TypedWithBody(integrationHandler.HandleAppIntegrationConnect),
+		handler.RateLimitByUser(5, time.Minute),
+	)
+	integrationGroup.Delete("/", handler.Typed(integrationHandler.HandleAppIntegrationRemove))
 
 	// Message routes
 	messageHandler := message.NewMessageHandler(
@@ -288,6 +375,10 @@ func (s *APIServer) RegisterRoutes(
 		sessionManager.OptionalSession,
 	)
 
+	// Setup checklist of new apps
+	setupHandler := appsetup.NewAppSetupHandler(appStateManager, commandStore, usageStore)
+	appGroup.Get("/setup", handler.Typed(setupHandler.HandleAppSetupGet))
+
 	// State routes
 	stateHandler := appstate.NewAppStateHandler(appStateManager)
 
@@ -296,4 +387,5 @@ func (s *APIServer) RegisterRoutes(
 	stateGroup.Get("/guilds", handler.Typed(stateHandler.HandleStateGuildList))
 	stateGroup.Delete("/guilds/{guildID}", handler.Typed(stateHandler.HandleStateGuildLeave))
 	stateGroup.Get("/guilds/{guildID}/channels", handler.Typed(stateHandler.HandleStateGuildChannelList))
+	stateGroup.Get("/guilds/{guildID}/roles", handler.Typed(stateHandler.HandleStateGuildRoleList))
 }

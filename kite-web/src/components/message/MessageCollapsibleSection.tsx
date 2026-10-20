@@ -5,22 +5,26 @@ import { ChevronRightIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import MessageValidationErrorIndicator from "./MessageValidationErrorMarker";
 import { useAutoAnimate } from "@formkit/auto-animate/react";
+import { ValidationScope } from "@/lib/message/validationStore";
 
 export default function MessageCollapsibleSection({
   children,
   title,
   defaultOpen = true,
   size = "xl",
-  valiationPathPrefix,
+  validation,
   actions,
   className,
   animate = true,
+  count,
 }: {
   children: ReactNode;
   title: string;
+  // Shown next to the title like the counter of an input, e.g. "3 / 10".
+  count?: ReactNode;
   defaultOpen?: boolean;
   size?: "sm" | "md" | "lg" | "xl";
-  valiationPathPrefix?: string | string[];
+  validation?: ValidationScope;
   actions?: ReactNode;
   className?: string;
   animate?: boolean;
@@ -60,16 +64,19 @@ export default function MessageCollapsibleSection({
             )}
           />
           <div>{title}</div>
-          {valiationPathPrefix && (
+          {count !== undefined && (
+            <div className="pl-1 text-sm italic font-light text-muted-foreground">
+              {count}
+            </div>
+          )}
+          {validation && (
             <div className="pl-1">
-              <MessageValidationErrorIndicator
-                pathPrefix={valiationPathPrefix}
-              />
+              <MessageValidationErrorIndicator scope={validation} />
             </div>
           )}
         </CollapsibleTrigger>
         {actions && (
-          <div className="flex-none flex items-center space-x-3">{actions}</div>
+          <div className="flex-none flex items-center space-x-1">{actions}</div>
         )}
       </div>
       <CollapsibleContent

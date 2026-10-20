@@ -242,6 +242,7 @@ func TestStringConversions(t *testing.T) {
 		{name: "message", value: NewDiscordMessage(discord.Message{Content: "content"}), expected: "content"},
 		{name: "user", value: NewDiscordUser(discord.User{ID: 123}), expected: "<@123>"},
 		{name: "member", value: NewDiscordMember(discord.Member{User: discord.User{ID: 123}}), expected: "<@123>"},
+		{name: "null", value: Null, expected: ""},
 	}
 
 	for _, test := range tests {
@@ -249,4 +250,37 @@ func TestStringConversions(t *testing.T) {
 			assert.Equal(t, test.expected, test.value.String())
 		})
 	}
+}
+
+func TestJSONValue(t *testing.T) {
+	v := NewFromJSONValue(map[string]any{
+		"name":  "a",
+		"count": float64(2),
+		"items": []any{true, nil},
+	})
+	assert.Equal(t, map[string]any{
+		"name":  "a",
+		"count": int64(2),
+		"items": []any{true, nil},
+	}, v.JSONValue())
+
+	user := NewDiscordUser(discord.User{ID: 5})
+	assert.Equal(t, "5", user.JSONValue())
+	assert.Equal(t, []any{int64(1), "x"}, NewAny([]any{1, "x"}).JSONValue())
+	assert.Equal(t, []any{"5", "6"}, NewAny([]string{"5", "6"}).JSONValue())
+}
+
+func TestEquals(t *testing.T) {
+	a, b := NewString("token"), NewString("token")
+	assert.True(t, a.Equals(&b))
+
+	other := NewString("tokem")
+	assert.False(t, a.Equals(&other))
+
+	empty, null := NewString(""), Null
+	assert.True(t, empty.Equals(&empty))
+	assert.False(t, empty.Equals(&null))
+
+	one, oneString := NewInt(1), NewString("1")
+	assert.False(t, one.Equals(&oneString))
 }

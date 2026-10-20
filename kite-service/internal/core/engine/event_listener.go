@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
+	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/diamondburned/arikawa/v3/gateway"
 	"github.com/diamondburned/arikawa/v3/state"
 	"github.com/diamondburned/arikawa/v3/utils/ws"
 	"github.com/kitecloud/kite/kite-service/internal/model"
 	"github.com/kitecloud/kite/kite-service/pkg/flow"
+	"github.com/kitecloud/kite/kite-service/pkg/schedule"
 	"gopkg.in/guregu/null.v4"
 )
 
@@ -17,11 +20,17 @@ type EventListener struct {
 	listener *model.EventListener
 	flow     *flow.CompiledFlowNode
 	env      Env
+
+	// schedule is only set for scheduled listeners.
+	schedule *listenerSchedule
 }
 
+// NewEventListener compiles a listener. catchUp lets a scheduled listener run
+// the latest occurrence it missed while the engine was down.
 func NewEventListener(
 	listener *model.EventListener,
 	env Env,
+	catchUp bool,
 ) (*EventListener, error) {
 	flow, err := flow.CompileEventListener(listener.FlowSource)
 	if err != nil {
@@ -34,11 +43,40 @@ func NewEventListener(
 		return nil, fmt.Errorf("failed to compile event listener flow: %w", err)
 	}
 
-	return &EventListener{
+	res := &EventListener{
 		listener: listener,
 		flow:     flow,
 		env:      env,
-	}, nil
+	}
+
+	if listener.Source == model.EventSourceSchedule {
+		res.schedule, err = newListenerSchedule(flow.EventScheduleCron(), listener.LastRunAt, catchUp)
+		if err != nil {
+			slog.Error(
+				"Failed to parse event listener schedule",
+				slog.String("app_id", listener.AppID),
+				slog.String("event_listener_id", listener.ID),
+				slog.String("error", err.Error()),
+			)
+			return nil, fmt.Errorf("failed to parse event listener schedule: %w", err)
+		}
+	}
+
+	return res, nil
+}
+
+func (l *EventListener) HandleScheduledRun(session *state.State, occurrence time.Time) {
+	l.env.executeFlowEvent(
+		context.Background(),
+		l.listener.AppID,
+		l.flow,
+		session,
+		&schedule.Event{Time: occurrence},
+		entityLinks{
+			EventListenerID: null.NewString(l.listener.ID, true),
+		},
+		nil,
+	)
 }
 
 func (l *EventListener) HandleEvent(appID string, session *state.State, event gateway.Event) {
@@ -46,8 +84,13 @@ func (l *EventListener) HandleEvent(appID string, session *state.State, event ga
 		EventListenerID: null.NewString(l.listener.ID, true),
 	}
 
+	var botID discord.UserID
+	if session != nil {
+		botID = session.Ready().User.ID
+	}
+
 	// TODO: check listener specific filters as well
-	if !l.shouldHandleEvent(event) {
+	if !l.shouldHandleEvent(event, botID) {
 		return
 	}
 
@@ -62,9 +105,14 @@ func (l *EventListener) HandleEvent(appID string, session *state.State, event ga
 	)
 }
 
-func (l *EventListener) shouldHandleEvent(e ws.Event) bool {
+// shouldHandleEvent reports whether the listener runs for an event. botID is
+// the app's own user, zero if unknown.
+func (l *EventListener) shouldHandleEvent(e ws.Event, botID discord.UserID) bool {
 	switch d := e.(type) {
 	case *gateway.MessageCreateEvent:
+		if l.listener != nil && l.listener.Type == model.EventListenerTypeDiscordGuildBoost {
+			return isBoostMessage(d.Message)
+		}
 		// TODO?: It would be better if we check if the author is specifically the current app
 		return !d.Author.Bot
 	case *gateway.MessageUpdateEvent:
@@ -75,7 +123,36 @@ func (l *EventListener) shouldHandleEvent(e ws.Event) bool {
 		return true
 	case *gateway.GuildMemberRemoveEvent:
 		return true
+	case *gateway.MessageReactionAddEvent:
+		// Ignore the app's own reactions, or a flow that adds a reaction
+		// would trigger itself. Reactions of other bots still go through,
+		// since the remove event can't tell who is a bot without an API call.
+		return d.UserID != botID
+	case *gateway.MessageReactionRemoveEvent:
+		// Same for removals, e.g. a flow removing its own reaction.
+		return d.UserID != botID
+	// arikawa derives these from GUILD_CREATE and GUILD_DELETE, leaving out
+	// guilds that load on connect or recover from an outage.
+	case *state.GuildJoinEvent:
+		return true
+	case *state.GuildLeaveEvent:
+		return true
 	}
 
+	return false
+}
+
+// isBoostMessage reports whether a message is the system message Discord posts
+// when a member boosts the server. The author is the member who boosted. A
+// boost that takes the server to a new level gets one of the tier types
+// instead of the plain one.
+func isBoostMessage(msg discord.Message) bool {
+	switch msg.Type {
+	case discord.NitroBoostMessage,
+		discord.NitroTier1Message,
+		discord.NitroTier2Message,
+		discord.NitroTier3Message:
+		return true
+	}
 	return false
 }

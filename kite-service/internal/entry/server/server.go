@@ -12,6 +12,7 @@ import (
 	"github.com/kitecloud/kite/kite-service/internal/core/command"
 	"github.com/kitecloud/kite/kite-service/internal/core/engine"
 	"github.com/kitecloud/kite/kite-service/internal/core/event"
+	"github.com/kitecloud/kite/kite-service/internal/core/flowai"
 	"github.com/kitecloud/kite/kite-service/internal/core/gateway"
 	"github.com/kitecloud/kite/kite-service/internal/core/plan"
 	"github.com/kitecloud/kite/kite-service/internal/core/usage"
@@ -19,11 +20,13 @@ import (
 	"github.com/kitecloud/kite/kite-service/internal/db/s3"
 	"github.com/kitecloud/kite/kite-service/internal/store"
 	"github.com/kitecloud/kite/kite-service/internal/util"
+	"github.com/kitecloud/kite/kite-service/pkg/flow"
 	"github.com/kitecloud/kite/kite-service/pkg/plugin"
 	"github.com/kitecloud/kite/kite-service/pkg/plugin/counting"
 	"github.com/kitecloud/kite/kite-service/pkg/plugin/starboard"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
+	"github.com/kitecloud/kite/kite-service/pkg/provider"
+	"github.com/openai/openai-go/v2"
+	"github.com/openai/openai-go/v2/option"
 )
 
 func StartServer(c context.Context, cfg *config.Config) error {
@@ -68,16 +71,36 @@ func StartServer(c context.Context, cfg *config.Config) error {
 		return fmt.Errorf("failed to create token crypt: %w", err)
 	}
 
+	for id, integration := range cfg.Integrations {
+		if err := flow.ConfigureIntegration(id, integration.APIKey, integration.AppID); err != nil {
+			return fmt.Errorf("failed to configure integration: %w", err)
+		}
+	}
+
 	var openaiClient openai.Client
+	var flowAssistant *flowai.Assistant
 	if cfg.OpenAI.APIKey != "" {
 		openaiClient = openai.NewClient(option.WithAPIKey(cfg.OpenAI.APIKey))
+		flowAssistant = flowai.NewAssistant(&openaiClient, flowai.Config{
+			Model:           cfg.Assistant.Model,
+			ReasoningEffort: cfg.Assistant.ReasoningEffort,
+			MaxOutputTokens: cfg.Assistant.MaxOutputTokens,
+		})
 	}
+
+	cooldownProvider := provider.NewMemoryCooldownProvider()
+	go cooldownProvider.Run(ctx)
 
 	pluginRegistry := plugin.NewRegistry()
 	pluginRegistry.Register(
 		counting.NewCountingPlugin(),
 		starboard.NewStarboardPlugin(),
 	)
+
+	planManager := plan.NewPlanManager(pg, pg, pg, plan.PlansFromConfig(cfg.Billing.Plans), plan.PlanManagerConfig{
+		DiscordBotToken: cfg.Discord.BotToken,
+		DiscordGuildID:  cfg.Discord.GuildID,
+	})
 
 	engine := engine.NewEngine(
 		engine.Env{
@@ -92,6 +115,7 @@ func StartServer(c context.Context, cfg *config.Config) error {
 				PopulateOverlap:        cfg.Engine.PopulateOverlap,
 			},
 			AppStore:             pg,
+			FeatureProvider:      planManager,
 			LogStore:             pg,
 			UsageStore:           pg,
 			MessageStore:         pg,
@@ -102,10 +126,13 @@ func StartServer(c context.Context, cfg *config.Config) error {
 			PluginValueStore:     pg,
 			PluginRegistry:       pluginRegistry,
 			VariableValueStore:   pg,
+			AppSecretStore:       pg,
+			AppIntegrationStore:  pg,
 			ResumePointStore:     pg,
 			HttpClient:           engineHTTPClient(cfg),
 			OpenaiClient:         &openaiClient,
 			TokenCrypt:           tokenCrypt,
+			CooldownProvider:     cooldownProvider,
 		},
 	)
 	engine.Run(ctx)
@@ -113,11 +140,6 @@ func StartServer(c context.Context, cfg *config.Config) error {
 	commandManager := command.NewCommandManager(pg, pg, pg, pluginRegistry, tokenCrypt)
 
 	handler := event.NewEventHandlerWrapper(engine, pg)
-
-	planManager := plan.NewPlanManager(pg, pg, pg, plan.PlansFromConfig(cfg.Billing.Plans), plan.PlanManagerConfig{
-		DiscordBotToken: cfg.Discord.BotToken,
-		DiscordGuildID:  cfg.Discord.GuildID,
-	})
 
 	gateway := gateway.NewGatewayManager(pg, pg, planManager, handler, tokenCrypt, pluginRegistry, gateway.GatewayManagerConfig{
 		ClusterCount:           cfg.ClusterCount,
@@ -128,12 +150,14 @@ func StartServer(c context.Context, cfg *config.Config) error {
 		StartInterval:          cfg.Gateway.StartInterval,
 	})
 	gateway.Run(ctx)
+	engine.RunScheduler(ctx, gateway)
 
-	usage := usage.NewUsageManager(pg, pg, pg, planManager)
+	usage := usage.NewUsageManager(pg, pg, pg, pg, pg, pg, planManager)
 
 	if cfg.IsPrimaryCluster() {
 		planManager.Run(ctx)
 		usage.Run(ctx)
+		commandManager.Run(ctx)
 	}
 
 	apiServer := api.NewAPIServer(api.APIServerConfig{
@@ -148,6 +172,7 @@ func StartServer(c context.Context, cfg *config.Config) error {
 		UserLimits: api.APIUserLimitsConfig{
 			MaxAppsPerUser: cfg.UserLimits.MaxAppsPerUser,
 		},
+		AssistantMaxRepairs: cfg.Assistant.MaxRepairs,
 		Billing: api.BillingConfig{
 			LemonSqueezyAPIKey:        cfg.Billing.LemonSqueezyAPIKey,
 			LemonSqueezySigningSecret: cfg.Billing.LemonSqueezySigningSecret,
@@ -156,8 +181,9 @@ func StartServer(c context.Context, cfg *config.Config) error {
 			Plans:                     cfg.Billing.Plans,
 		},
 	},
-		pg, pg, pg, pg, pg, pg, pg, pg, pg, pg, pg, pg, pg, pg,
-		assetStore, gateway, planManager, pluginRegistry, tokenCrypt, commandManager,
+		pg, pg, pg, pg, pg, pg, pg, pg, pg, pg, pg, pg, pg, pg, pg,
+		assetStore, gateway, engine.WebhookRunner(gateway), planManager, pluginRegistry, tokenCrypt, commandManager,
+		pg, flowAssistant, pg, pg, pg,
 	)
 	address := fmt.Sprintf("%s:%d", cfg.API.Host, cfg.API.Port)
 	if err := apiServer.Serve(ctx, address); err != nil {

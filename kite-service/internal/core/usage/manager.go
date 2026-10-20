@@ -8,18 +8,34 @@ import (
 
 	"github.com/kitecloud/kite/kite-service/internal/core/plan"
 	"github.com/kitecloud/kite/kite-service/internal/store"
+	"github.com/kitecloud/kite/kite-service/internal/util"
 	"gopkg.in/guregu/null.v4"
 )
 
 const (
-	UsageRecordExpiry = 3 * 30 * 24 * time.Hour
+	// Only the current month is ever read, the rest is slack for support.
+	UsageRecordExpiry = 40 * 24 * time.Hour
 	LogEntryExpiry    = 30 * 24 * time.Hour
+
+	// Buttons stop working once these expire, so they count from last use, not creation.
+	ResumePointExpiry              = 90 * 24 * time.Hour
+	FlowMessageInstanceExpiry      = 90 * 24 * time.Hour
+	DashboardMessageInstanceExpiry = 360 * 24 * time.Hour
+	ShareCodeExpiry                = 90 * 24 * time.Hour
+
+	cleanupBatchSize = 5000
+	// Caps a single tick so a large backlog can't stall the credit sweep, the
+	// rest is picked up by the next tick.
+	cleanupMaxBatches = 100
 )
 
 type UsageManager struct {
-	appStore   store.AppStore
-	usageStore store.UsageStore
-	logStore   store.LogStore
+	appStore             store.AppStore
+	usageStore           store.UsageStore
+	logStore             store.LogStore
+	resumePointStore     store.ResumePointStore
+	messageInstanceStore store.MessageInstanceStore
+	shareCodeStore       store.ShareCodeStore
 
 	planManager *plan.PlanManager
 }
@@ -28,18 +44,27 @@ func NewUsageManager(
 	appStore store.AppStore,
 	usageStore store.UsageStore,
 	logStore store.LogStore,
+	resumePointStore store.ResumePointStore,
+	messageInstanceStore store.MessageInstanceStore,
+	shareCodeStore store.ShareCodeStore,
 	planManager *plan.PlanManager,
 ) *UsageManager {
 	return &UsageManager{
-		appStore:    appStore,
-		usageStore:  usageStore,
-		logStore:    logStore,
-		planManager: planManager,
+		appStore:             appStore,
+		usageStore:           usageStore,
+		logStore:             logStore,
+		resumePointStore:     resumePointStore,
+		messageInstanceStore: messageInstanceStore,
+		shareCodeStore:       shareCodeStore,
+		planManager:          planManager,
 	}
 }
 
 func (m *UsageManager) Run(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Minute)
+	// Each sweep sums the whole month so far, millions of rows by the end of
+	// it. Apps may overrun their credits by up to one interval before being
+	// disabled.
+	ticker := time.NewTicker(5 * time.Minute)
 	cleanupTicker := time.NewTicker(1 * time.Hour)
 
 	go func() {
@@ -68,6 +93,24 @@ func (m *UsageManager) Run(ctx context.Context) {
 						slog.String("error", err.Error()),
 					)
 				}
+				if err := m.cleanupResumePoints(ctx); err != nil {
+					slog.Error(
+						"Failed to cleanup resume points",
+						slog.String("error", err.Error()),
+					)
+				}
+				if err := m.cleanupMessageInstances(ctx); err != nil {
+					slog.Error(
+						"Failed to cleanup message instances",
+						slog.String("error", err.Error()),
+					)
+				}
+				if err := m.cleanupShareCodes(ctx); err != nil {
+					slog.Error(
+						"Failed to cleanup share codes",
+						slog.String("error", err.Error()),
+					)
+				}
 			}
 		}
 	}()
@@ -79,7 +122,7 @@ func (m *UsageManager) disableAppsWithNoCredits(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	start, end := startAndEndOfMonth(time.Now().UTC())
+	start, end := util.StartAndEndOfMonth(time.Now().UTC())
 
 	creditsUsed, err := m.usageStore.AllUsageCreditsUsedBetween(ctx, start, end)
 	if err != nil {
@@ -141,7 +184,9 @@ func (m *UsageManager) disableApp(ctx context.Context, appID string) {
 func (m *UsageManager) cleanupUsageRecords(ctx context.Context) error {
 	expiry := time.Now().UTC().Add(-UsageRecordExpiry)
 
-	err := m.usageStore.DeleteUsageRecordsBefore(ctx, expiry)
+	err := deleteInBatches(ctx, func(ctx context.Context) (int64, error) {
+		return m.usageStore.DeleteUsageRecordsBefore(ctx, expiry, cleanupBatchSize)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to delete usage records: %w", err)
 	}
@@ -159,9 +204,46 @@ func (m *UsageManager) cleanupLogEntries(ctx context.Context) error {
 	return nil
 }
 
-func startAndEndOfMonth(t time.Time) (time.Time, time.Time) {
-	year, month, _ := t.Date()
-	start := time.Date(year, month, 1, 0, 0, 0, 0, t.Location())
-	end := start.AddDate(0, 1, 0).Add(-time.Nanosecond)
-	return start, end
+func (m *UsageManager) cleanupResumePoints(ctx context.Context) error {
+	now := time.Now().UTC()
+
+	return deleteInBatches(ctx, func(ctx context.Context) (int64, error) {
+		return m.resumePointStore.DeleteStaleResumePoints(ctx, now, now.Add(-ResumePointExpiry), cleanupBatchSize)
+	})
+}
+
+func (m *UsageManager) cleanupMessageInstances(ctx context.Context) error {
+	now := time.Now().UTC()
+
+	return deleteInBatches(ctx, func(ctx context.Context) (int64, error) {
+		return m.messageInstanceStore.DeleteUnusedMessageInstances(
+			ctx,
+			now.Add(-FlowMessageInstanceExpiry),
+			now.Add(-DashboardMessageInstanceExpiry),
+			cleanupBatchSize,
+		)
+	})
+}
+
+func (m *UsageManager) cleanupShareCodes(ctx context.Context) error {
+	usedBefore := time.Now().UTC().Add(-ShareCodeExpiry)
+
+	return deleteInBatches(ctx, func(ctx context.Context) (int64, error) {
+		return m.shareCodeStore.DeleteUnusedShareCodes(ctx, usedBefore, cleanupBatchSize)
+	})
+}
+
+func deleteInBatches(ctx context.Context, deleteBatch func(ctx context.Context) (int64, error)) error {
+	for range cleanupMaxBatches {
+		batchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		deleted, err := deleteBatch(batchCtx)
+		cancel()
+		if err != nil {
+			return err
+		}
+		if deleted < cleanupBatchSize {
+			return nil
+		}
+	}
+	return nil
 }

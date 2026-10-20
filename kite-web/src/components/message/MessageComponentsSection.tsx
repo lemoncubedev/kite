@@ -1,65 +1,101 @@
-import { useCurrentMessage } from "@/lib/message/state";
+import {
+  useChildIds,
+  useComponentsV2Enabled,
+  useDocumentStoreApi,
+  useRootId,
+} from "@/lib/message/state";
+import { ChevronDownIcon } from "lucide-react";
+import { slotLimit } from "@/lib/message/document";
+import { selectMenuTypes } from "@/lib/message/selectMenu";
+import { slotScope } from "@/lib/message/validationStore";
 import CollapsibleSection from "./MessageCollapsibleSection";
-import { useShallow } from "zustand/react/shallow";
 import { Button } from "../ui/button";
-import { getUniqueId } from "@/lib/utils";
-import { useCallback } from "react";
-import MessageComponentRow from "./MessageComponentRow";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
+import MessageComponentEntry from "./MessageComponentEntry";
+import MessageComponentAddDropdown from "./MessageComponentAddDropdown";
 
 export default function MessageComponentsSection({
   disableFlowEditor,
 }: {
   disableFlowEditor?: boolean;
 }) {
-  const components = useCurrentMessage(
-    useShallow((state) => state.components.map((e) => e.id))
-  );
-  const addRow = useCurrentMessage((state) => state.addComponentRow);
-  const clearComponents = useCurrentMessage(
-    (state) => state.clearComponentRows
-  );
+  const rootId = useRootId();
+  const componentIds = useChildIds(rootId, "components");
+  const componentsV2 = useComponentsV2Enabled();
+  const { insert, removeChildren } = useDocumentStoreApi().getState();
 
-  const addButtonRow = useCallback(() => {
-    if (components.length >= 5) return;
-    addRow({
-      id: getUniqueId(),
-      type: 1,
-      components: [],
-    });
-  }, [components, addRow]);
-
-  /* const addSelectMenuRow = useCallback(() => {
-    if (components.length >= 5) return;
-    addRow({
-      id: getUniqueId(),
-      type: 1,
-      components: [
-        {
-          id: getUniqueId(),
-          type: 3,
-          options: [],
-        },
-      ],
-    });
-  }, [components, addRow]); */
+  const limit = slotLimit("message", "components", componentsV2);
 
   return (
     <CollapsibleSection
       title="Components"
-      valiationPathPrefix="components"
+      validation={slotScope(rootId, "components")}
       className="space-y-4"
     >
-      {components.map((id, i) => (
-        <MessageComponentRow
+      {componentIds.map((id) => (
+        <MessageComponentEntry
           key={id}
-          rowIndex={i}
-          rowId={id}
+          id={id}
           disableFlowEditor={disableFlowEditor}
         />
       ))}
-      <div className="space-x-3">
-        <Button onClick={addButtonRow}>Add Button Row</Button>
-        <Button onClick={clearComponents} variant="outline">
+      <div className="flex flex-wrap gap-3">
+        {componentsV2 ? (
+          <MessageComponentAddDropdown
+            parentId={rootId}
+            context="root"
+            disabled={componentIds.length >= limit}
+          />
+        ) : (
+          <>
+            <Button
+              onClick={() =>
+                insert(rootId, "components", "end", { type: "actionRow" })
+              }
+              disabled={componentIds.length >= limit}
+            >
+              Add Button Row
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                asChild
+                disabled={componentIds.length >= limit}
+              >
+                <Button className="space-x-2">
+                  <div>Add Select Menu</div>
+                  <ChevronDownIcon className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                {selectMenuTypes.map((t) => (
+                  <DropdownMenuItem
+                    key={t.type}
+                    onClick={() => {
+                      const rowId = insert(rootId, "components", "end", {
+                        type: "actionRow",
+                      });
+                      insert(rowId, "components", "end", {
+                        type: "selectMenu",
+                        select_type: t.type === 3 ? undefined : t.type,
+                      });
+                    }}
+                  >
+                    {t.label}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </>
+        )}
+        <Button
+          onClick={() => removeChildren(rootId, "components")}
+          variant="outline"
+        >
           Clear Components
         </Button>
       </div>

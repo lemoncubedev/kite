@@ -208,3 +208,139 @@ func TestEvalTemplateAllowsOutputUnderLimit(t *testing.T) {
 		t.Errorf("got %d bytes, want 2002", len(res.String()))
 	}
 }
+
+// Appended variable values keep their spaces (#339).
+func TestEvalTemplateKeepSpace(t *testing.T) {
+	c := Context{Env: Env{"name": "world"}}
+
+	for template, want := range map[string]string{
+		" world":          " world",
+		"hello {{name}} ": "hello world ",
+		" ":               " ",
+	} {
+		res, err := EvalTemplateKeepSpace(context.Background(), template, c)
+		if err != nil {
+			t.Fatalf("%q: %v", template, err)
+		}
+		if got := res.String(); got != want {
+			t.Errorf("EvalTemplateKeepSpace(%q) = %q, want %q", template, got, want)
+		}
+	}
+}
+
+// A lone placeholder keeps its value's type even when surrounded by spaces.
+func TestEvalTemplateKeepSpaceSinglePlaceholder(t *testing.T) {
+	res, err := EvalTemplateKeepSpace(context.Background(), " {{1 + 1}} ", testContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Int() != 2 || res.String() != "2" {
+		t.Errorf("got %q, want the placeholder's value", res.String())
+	}
+}
+
+func TestResumeContextFallsBackToEarlierInteractions(t *testing.T) {
+	origin := Context{Env: Env{
+		"user": "origin-user",
+		"arg":  func(name string) any { return "origin-" + name },
+		"input": func(customID string) any {
+			if customID == "age" {
+				return "30"
+			}
+			return nil
+		},
+		"inputs": func(customID string) any {
+			if customID == "age" {
+				return []string{"30"}
+			}
+			return nil
+		},
+	}}
+	previous := Context{Env: Env{
+		"user":   "previous-user",
+		"arg":    func(name string) any { return nil },
+		"input":  func(customID string) any { return "previous-" + customID },
+		"inputs": func(customID string) any { return []string{"previous-" + customID} },
+	}}
+
+	c := Context{Env: Env{
+		"user":   "clicker",
+		"arg":    func(name string) any { return nil },
+		"input":  func(customID string) any { return nil },
+		"inputs": func(customID string) any { return nil },
+	}}
+	c.SetResumeContext([]Context{origin, previous})
+
+	cases := map[string]string{
+		`user`:                    "clicker",
+		`origin.user`:             "origin-user",
+		`previous.user`:           "previous-user",
+		`arg("reason")`:           "origin-reason",
+		`input("name")`:           "previous-name",
+		`inputs("name")[0]`:       "previous-name",
+		`origin.arg("why")`:       "origin-why",
+		`origin.inputs("age")[0]`: "30",
+	}
+	for expression, want := range cases {
+		res, err := Eval(context.Background(), expression, c)
+		if err != nil {
+			t.Fatalf("%s: %v", expression, err)
+		}
+		if res.String() != want {
+			t.Errorf("%s = %q, want %q", expression, res.String(), want)
+		}
+	}
+}
+
+func TestResumeContextPrefersCurrentInteraction(t *testing.T) {
+	c := Context{Env: Env{
+		"input":  func(customID string) any { return "current" },
+		"inputs": func(customID string) any { return []string{"current"} },
+	}}
+	c.SetResumeContext([]Context{{Env: Env{
+		"input":  func(customID string) any { return "earlier" },
+		"inputs": func(customID string) any { return []string{"earlier"} },
+	}}})
+
+	for _, expression := range []string{`input("name")`, `inputs("name")[0]`} {
+		res, err := Eval(context.Background(), expression, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.String() != "current" {
+			t.Errorf("%s = %q, want %q", expression, res.String(), "current")
+		}
+	}
+}
+
+func TestEvalReadsFieldsOfUnknownValues(t *testing.T) {
+	// Results are only known when the expression runs, so their fields are
+	// read by fetchField, which has to keep optional chaining working.
+	c := Context{Env: Env{
+		"result": func(id string) any {
+			if id == "none" {
+				return nil
+			}
+			return map[string]any{"a": map[string]any{"b": "deep"}, "list": []any{map[string]any{"name": "x"}}}
+		},
+	}}
+
+	tests := map[string]string{
+		"{{result('x').a.b}}":                     "deep",
+		"{{result('x').list[0].name}}":            "x",
+		"{{map(result('x').list, .name)}}":        "[x]",
+		"{{'b' in result('x').a}}":                "true",
+		"{{result('x').missing ?? 'default'}}":    "default",
+		"[{{result('none')?.a.b}}]":               "[]",
+		"{{result('none')?.a.b ?? 'default'}}":    "default",
+		"{{(result('none')?.a)?.b ?? 'default'}}": "default",
+	}
+	for template, want := range tests {
+		got, err := EvalTemplateToString(context.Background(), template, c)
+		if err != nil {
+			t.Errorf("%s: %v", template, err)
+		} else if got != want {
+			t.Errorf("%s: got %q, want %q", template, got, want)
+		}
+	}
+}
